@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "MetaYoshi",
+  "version": "0.1.7",
+  "version_name": "metayoshi-0.1.7",
+  "action": {
+    "default_icon": {
+      "16": "assets/metayoshi-16.png",
+      "32": "assets/metayoshi-32.png",
+      "48": "assets/metayoshi-48.png",
+      "64": "assets/metayoshi-64.png",
+      "128": "assets/metayoshi-128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/metayoshi-16.png",
+    "32": "assets/metayoshi-32.png",
+    "48": "assets/metayoshi-48.png",
+    "64": "assets/metayoshi-64.png",
+    "128": "assets/metayoshi-128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ],
+      "js": ["assets/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/inpage.js"],
+      "matches": [
+        "https://*/*",
+        "http://*/*"
+      ]
+    }
+  ]
+}
