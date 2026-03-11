@@ -49,3 +49,4 @@ src/coins/logos/*.js
 src/coins/logos/*.css
 src/coins/logos/*.wasm
 dist
+docs/metayoshi-wallet-fusion-master-runbook.md
