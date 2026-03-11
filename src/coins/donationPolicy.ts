@@ -86,7 +86,8 @@ const CACHE_TTL_MS = 60_000
 const DONATION_COIN_ID_BY_NETWORK_ID: Record<string, string> = {
   rtm: 'raptoreum',
   doge: 'dogecoin',
-  firo: 'firo'
+  firo: 'firo',
+  arr: 'arr'
 }
 
 function resolveDonationCoinId(network: Network): string {

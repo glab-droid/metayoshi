@@ -1,67 +1,19 @@
 import type { CoinModule } from './types'
 import { BUILD_CONFIG, getTestedModelIds } from '../buildConfig'
+import {
+  getBundledEthereumLayer2CoinIds,
+  getBundledEvmCoinIds,
+  getCanonicalCoinId,
+  getEvmChainIdToCoinIdMap
+} from './coinRegistry'
 
 export const DISABLED_NETWORK_IDS = new Set<string>([
 ])
 
-export const EVM_COIN_IDS = new Set<string>(['eth', 'arb', 'op', 'base', 'bnb', 'polygon', 'avaxc', 'cronos', 'zksync'])
-export const EVM_ETHEREUM_L2_COIN_IDS = new Set<string>(['arb', 'op', 'base', 'zksync'])
+export const EVM_COIN_IDS = new Set<string>(getBundledEvmCoinIds())
+export const EVM_ETHEREUM_L2_COIN_IDS = new Set<string>(getBundledEthereumLayer2CoinIds())
 
-const EVM_CHAIN_ID_TO_COIN_ID: Record<number, string> = {
-  1: 'eth',
-  10: 'op',
-  25: 'cronos',
-  56: 'bnb',
-  137: 'polygon',
-  324: 'zksync',
-  42161: 'arb',
-  43114: 'avaxc',
-  8453: 'base'
-}
-
-const CHAINLIST_EVM_ALIAS_TO_COIN_ID: Record<string, string> = {
-  eth: 'eth',
-  ethereum: 'eth',
-  'ethereum-mainnet': 'eth',
-  'mainnet-ethereum': 'eth',
-  arb: 'arb',
-  arbitrum: 'arb',
-  'arbitrum-one': 'arb',
-  'mainnet-arbitrum': 'arb',
-  op: 'op',
-  optimism: 'op',
-  'optimism-mainnet': 'op',
-  'mainnet-optimism': 'op',
-  base: 'base',
-  'base-mainnet': 'base',
-  'mainnet-base': 'base',
-  bnb: 'bnb',
-  bsc: 'bnb',
-  'bnb-smart-chain': 'bnb',
-  'binance-smart-chain': 'bnb',
-  'bnb-smart-chain-mainnet': 'bnb',
-  'binance-smart-chain-mainnet': 'bnb',
-  'bsc-mainnet': 'bnb',
-  'mainnet-bsc': 'bnb',
-  zksync: 'zksync',
-  'zksync-era': 'zksync',
-  'zksync-mainnet': 'zksync',
-  'mainnet-zksync': 'zksync',
-  polygon: 'polygon',
-  'polygon-pos': 'polygon',
-  'polygon-mainnet': 'polygon',
-  'polygon-bor': 'polygon',
-  'mainnet-polygon': 'polygon',
-  avax: 'avaxc',
-  avaxc: 'avaxc',
-  avalanche: 'avaxc',
-  'avalanche-c-chain': 'avaxc',
-  'mainnet-avalanche': 'avaxc',
-  cronos: 'cronos',
-  'cronos-mainnet': 'cronos',
-  'cronos-evm': 'cronos',
-  'mainnet-cronos': 'cronos'
-}
+const EVM_CHAIN_ID_TO_COIN_ID: Record<number, string> = getEvmChainIdToCoinIdMap()
 
 function normalizeCoinSelectionToken(rawToken: string): string {
   return String(rawToken || '')
@@ -74,7 +26,7 @@ function normalizeCoinSelectionToken(rawToken: string): string {
 function mapChainlistAliasToCoinId(rawToken: string): string | null {
   const normalized = normalizeCoinSelectionToken(rawToken)
   if (!normalized) return null
-  const direct = CHAINLIST_EVM_ALIAS_TO_COIN_ID[normalized]
+  const direct = getCanonicalCoinId(normalized)
   if (direct) return direct
   if (/^eip155:\d+$/.test(normalized)) {
     const chainId = Number(normalized.slice('eip155:'.length))
@@ -90,16 +42,9 @@ function mapChainlistAliasToCoinId(rawToken: string): string | null {
 function expandEnabledCoinSelectionToken(rawToken: string): string[] {
   const token = normalizeCoinSelectionToken(rawToken)
   if (!token) return []
-  if (token === 'btc' || token === 'bitcoin') return ['srv--bitcoin']
-  if (token === 'ada' || token === 'cardano') return ['ada']
-  if (token === 'cronos') return ['cronos']
-  if (token === 'dash' || token === 'sdash' || token === 'srv--dash') return ['dash']
-  if (token === 'doge' || token === 'dogecoin') return ['doge']
   if (token === 'evm') return [...EVM_COIN_IDS]
   if (token === 'evm-l2' || token === 'eth-l2' || token === 'l2') return [...EVM_ETHEREUM_L2_COIN_IDS]
   if (token === 'evm-l1') return [...EVM_COIN_IDS].filter((id) => !EVM_ETHEREUM_L2_COIN_IDS.has(id))
-  if (token === 'trx' || token === 'tron') return ['tron']
-  if (token === 'xlm' || token === 'stellar') return ['xlm']
   const chainlistMapped = mapChainlistAliasToCoinId(token)
   if (chainlistMapped) return [chainlistMapped]
   return [token]

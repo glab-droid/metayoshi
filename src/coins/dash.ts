@@ -9,6 +9,12 @@ export const DASH_ADDRESS_SPEC: UtxoAddressSpec = {
   p2pkhVersion: 0x4c
 }
 
+export const DASH_FEE_PER_BYTE = 0.00002
+
+export function estimateDashFee(txBytes: number): number {
+  return txBytes * DASH_FEE_PER_BYTE
+}
+
 export function createDashNetwork(ctx: CoinRuntimeContext): Network {
   const { bridgeUsername, bridgePassword } = resolveBridgeCredentials()
   return {
@@ -29,6 +35,7 @@ export function createDashNetwork(ctx: CoinRuntimeContext): Network {
     bridgePassword,
     explorerUrl: import.meta.env.VITE_DASH_EXPLORER || DASH_API_INFO.defaultExplorerUrl || 'https://insight.dash.org/insight',
     capabilities: DASH_CAPABILITIES,
+    feePerByte: DASH_FEE_PER_BYTE,
     logo: getUnifiedLogoByName('dash')
   }
 }
@@ -39,6 +46,7 @@ export const dashCoin: CoinModule = {
   coinSymbol: 'DASH',
   capabilities: DASH_CAPABILITIES,
   utxoAddress: DASH_ADDRESS_SPEC,
-  createNetwork: createDashNetwork
+  createNetwork: createDashNetwork,
+  estimateFee: estimateDashFee
 }
 

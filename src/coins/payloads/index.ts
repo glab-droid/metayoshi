@@ -1,5 +1,15 @@
 import { BTCZ_PAYLOADS } from './btcz'
-import { createUtxoPayloadCatalog } from './common'
+import {
+  createCardanoPayloadCatalog,
+  createCosmosPayloadCatalog,
+  createEvmPayloadCatalog,
+  createGenericPayloadCatalog,
+  createSolanaPayloadCatalog,
+  createStellarPayloadCatalog,
+  createSuiPayloadCatalog,
+  createTronPayloadCatalog,
+  createUtxoPayloadCatalog
+} from './common'
 import { DASH_PAYLOADS } from './dash'
 import { FIRO_PAYLOADS } from './firo'
 import { RTM_PAYLOADS } from './rtm'
@@ -45,12 +55,34 @@ function normalizePayloadNetworkId(networkId?: string): string {
 function createStandardPayloadCatalog(networkId: string): CoinPayloadCatalog | undefined {
   const meta = STANDARD_RUNTIME_META[networkId]
   if (!meta) return undefined
-  return createUtxoPayloadCatalog({
+  const input = {
     networkId,
     symbol: meta.symbol,
     coinId: meta.coinId,
-    chain: 'main'
-  })
+    chain: meta.chain || 'main'
+  } as const
+  switch (meta.protocolFamily) {
+    case 'evm':
+      return createEvmPayloadCatalog({ ...input, chainId: meta.chainId })
+    case 'solana':
+      return createSolanaPayloadCatalog(input)
+    case 'cosmos':
+      return createCosmosPayloadCatalog(input)
+    case 'tron':
+      return createTronPayloadCatalog(input)
+    case 'cardano':
+      return createCardanoPayloadCatalog(input)
+    case 'sui':
+      return createSuiPayloadCatalog(input)
+    case 'stellar':
+      return createStellarPayloadCatalog(input)
+    case 'utxo':
+    case 'xrp':
+    case 'monero':
+      return createUtxoPayloadCatalog(input)
+    default:
+      return createGenericPayloadCatalog(input)
+  }
 }
 
 export function getCoinPayloadCatalog(networkId?: string) {
@@ -73,4 +105,4 @@ export {
   FIRO_PAYLOADS,
 }
 
-export type { CoinPayloadCatalog, CoinPayloadBuilders, JsonRpcEnvelope, UtxoTxInputRef } from './types'
+export type { CoinPayloadCatalog, JsonRpcEnvelope, RestEnvelope, UtxoTxInputRef } from './types'

@@ -11,6 +11,20 @@ import {
 import { useWalletStore } from '../../store/walletStore'
 import { getSendBlockedSyncReason, isSendBlockedBySync } from '../../lib/sendSyncPolicy'
 import { isCosmosLikeModelId, resolveRuntimeModelId } from '../../lib/runtimeModel'
+import {
+  broadcastCosmosTx,
+  signCosmosAmino,
+  deriveCosmosKeyData,
+  signCosmosDirect,
+  signEvmMessage,
+  signEvmTransaction,
+  signEvmTypedData,
+  signAndSendEvmTransaction,
+  signSolanaMessage,
+  signSolanaTransaction,
+  signSolanaTransactions,
+  signAndSendSolanaTransaction
+} from '../../lib/dappSigning'
 
 function canUseChromeStorage(): boolean {
   return typeof chrome !== 'undefined' && Boolean(chrome.storage?.local)
@@ -18,6 +32,20 @@ function canUseChromeStorage(): boolean {
 
 function isDappEvmTransactionRequest(request: DappPendingRequest['request'] | null | undefined): request is DappSendEvmTransactionPayload {
   return Boolean(request && typeof request === 'object' && 'data' in request)
+}
+
+function asRecord(value: unknown): Record<string, any> | null {
+  return value && typeof value === 'object' ? value as Record<string, any> : null
+}
+
+function previewJson(value: unknown, maxLength = 240): string {
+  try {
+    const json = JSON.stringify(value)
+    if (!json) return ''
+    return json.length > maxLength ? `${json.slice(0, maxLength)}...` : json
+  } catch {
+    return String(value ?? '')
+  }
 }
 
 const DappRequestConfirm: React.FC = () => {
@@ -31,7 +59,9 @@ const DappRequestConfirm: React.FC = () => {
     setActiveNetwork,
     setActiveAccount,
     sendEvmTransaction,
+    sendXrpTransaction,
     sendCardanoTransaction,
+    sendMoneroTransaction,
     sendSolanaTransaction,
     sendStellarTransaction,
     sendTronTransaction,
@@ -64,20 +94,75 @@ const DappRequestConfirm: React.FC = () => {
     [networks, pendingRequest, activeNetwork]
   )
   const requestModelId = resolveRuntimeModelId(requestNetwork)
+  const requestPayload = asRecord(pendingRequest?.request)
+  const requestMethod = String(pendingRequest?.method || '').trim()
   const requestIsAssetSend = pendingRequest?.method === 'wallet_sendAsset'
   const requestIsEvmTx = !requestIsAssetSend && isDappEvmTransactionRequest(pendingRequest?.request)
+  const requestIsSignMessage = requestMethod === 'wallet_signMessage'
+  const requestIsSignTypedData = requestMethod === 'wallet_signTypedData'
+  const requestIsSignTransaction = requestMethod === 'wallet_signTransaction'
+  const requestIsSignAllTransactions = requestMethod === 'wallet_signAllTransactions'
+  const requestIsSignAndSendTransaction = requestMethod === 'wallet_signAndSendTransaction'
+  const requestIsCosmosSignDirect = requestMethod === 'wallet_cosmosSignDirect'
+  const requestIsCosmosSignAmino = requestMethod === 'wallet_cosmosSignAmino'
+  const requestIsCosmosSendTx = requestMethod === 'wallet_cosmosSendTx'
+  const requestIsCosmosGetKey = requestMethod === 'wallet_cosmosGetKey'
   const requestTypeLabel = requestIsAssetSend
     ? 'Asset Transfer'
+    : requestIsSignMessage
+    ? 'Message Signature'
+    : requestIsSignTypedData
+    ? 'Typed Data Signature'
+    : requestIsSignTransaction
+    ? 'Transaction Signature'
+    : requestIsSignAllTransactions
+    ? 'Batch Transaction Signature'
+    : requestIsSignAndSendTransaction
+    ? 'Sign And Send Transaction'
+    : requestIsCosmosSignDirect
+    ? 'Cosmos Direct Signature'
+    : requestIsCosmosSignAmino
+    ? 'Cosmos Amino Signature'
+    : requestIsCosmosGetKey
+    ? 'Cosmos Account Access'
+    : requestIsCosmosSendTx
+    ? 'Cosmos Broadcast'
     : requestIsEvmTx
     ? (String((pendingRequest?.request as DappSendEvmTransactionPayload | undefined)?.to || '').trim() ? 'Contract Call' : 'Contract Deployment')
     : 'Native Coin Transfer'
   const requestTo = requestIsAssetSend
     ? String((pendingRequest?.request as any)?.toAddress || '')
+    : requestIsSignMessage
+    ? String(requestPayload?.address || requestPayload?.signer || '')
+    : requestIsSignTypedData
+    ? String(requestPayload?.address || requestPayload?.signer || '')
+    : requestIsSignTransaction || requestIsSignAndSendTransaction
+    ? String(requestPayload?.to || requestPayload?.address || '').trim() || 'Serialized Transaction'
+    : requestIsCosmosSignDirect || requestIsCosmosSignAmino
+    ? String(requestPayload?.signerAddress || requestPayload?.address || '')
+    : requestIsCosmosGetKey
+    ? String(requestPayload?.chainId || '')
+    : requestIsCosmosSendTx
+    ? String(requestPayload?.chainId || requestPayload?.mode || '').trim() || 'Broadcast'
     : requestIsEvmTx
     ? String((pendingRequest?.request as DappSendEvmTransactionPayload | undefined)?.to || '').trim() || 'Contract Creation'
     : String((pendingRequest?.request as any)?.to || '')
   const requestAmount = requestIsAssetSend
     ? String((pendingRequest?.request as any)?.qty || '')
+    : requestIsSignMessage
+    ? `${String(requestPayload?.message || '').length} bytes`
+    : requestIsSignTypedData
+    ? 'Typed payload'
+    : requestIsSignTransaction || requestIsSignAndSendTransaction
+    ? String(requestPayload?.value || requestPayload?.amount || '')
+    : requestIsSignAllTransactions
+    ? `${Array.isArray(requestPayload?.serializedTxsBase64) ? requestPayload?.serializedTxsBase64.length : 0} txs`
+    : requestIsCosmosSignDirect || requestIsCosmosSignAmino
+    ? String(requestPayload?.chainId || '')
+    : requestIsCosmosGetKey
+    ? 'Account metadata'
+    : requestIsCosmosSendTx
+    ? String(requestPayload?.mode || '')
     : requestIsEvmTx
     ? String(
       (pendingRequest?.request as DappSendEvmTransactionPayload | undefined)?.value
@@ -107,6 +192,19 @@ const DappRequestConfirm: React.FC = () => {
   const requestTxType = requestIsEvmTx
     ? (pendingRequest?.request as DappSendEvmTransactionPayload | undefined)?.type
     : undefined
+  const requestPreview = requestIsSignMessage
+    ? previewJson(requestPayload?.message || '')
+    : requestIsSignTypedData
+    ? previewJson(requestPayload?.typedData)
+    : requestIsSignTransaction || requestIsSignAndSendTransaction
+    ? previewJson(requestPayload?.tx || requestPayload)
+    : requestIsCosmosSignDirect || requestIsCosmosSignAmino
+    ? previewJson(requestPayload?.signDoc || requestPayload)
+    : requestIsCosmosGetKey
+    ? previewJson({ chainId: requestPayload?.chainId, network: requestNetwork?.name })
+    : requestIsCosmosSendTx
+    ? previewJson({ mode: requestPayload?.mode, txBytesBase64: String(requestPayload?.txBytesBase64 || '').slice(0, 48) })
+    : ''
   const sendBlockedBySync = isSendBlockedBySync(isSyncing, syncPercent, isConnected, lowSyncStreak)
   const syncBlockedReason = getSendBlockedSyncReason(isSyncing, syncPercent, isConnected, lowSyncStreak)
 
@@ -161,6 +259,15 @@ const DappRequestConfirm: React.FC = () => {
     }
   }, [requestedId])
 
+  useEffect(() => {
+    if (!pendingRequest) return
+    const isWalletSendRoute =
+      pendingRequest.method === 'wallet_sendAsset'
+      || (pendingRequest.method === 'wallet_sendTransaction' && !requestIsEvmTx)
+    if (!isWalletSendRoute) return
+    navigate(`/tx/confirm?dappRequest=1&id=${encodeURIComponent(pendingRequest.id)}`, { replace: true })
+  }, [navigate, pendingRequest, requestIsEvmTx])
+
   const rejectRequest = async (): Promise<void> => {
     if (canUseChromeStorage() && pendingRequest) {
       await chrome.storage.local.set({
@@ -209,12 +316,137 @@ const DappRequestConfirm: React.FC = () => {
         setActiveAccount(pendingRequest.accountId)
       }
 
+      const latestBeforeRequest = useWalletStore.getState()
+      const accountForRequest = latestBeforeRequest.accounts.find((a) => a.id === pendingRequest.accountId) || latestBeforeRequest.accounts[0]
+      const accountIndex = Number.isInteger(accountForRequest?.derivationIndex)
+        ? Number(accountForRequest?.derivationIndex)
+        : Math.max(0, latestBeforeRequest.accounts.findIndex((a) => a.id === pendingRequest.accountId))
+      const mnemonic = String(latestBeforeRequest.sessionMnemonic || '').trim()
+      if (
+        (requestIsSignMessage
+          || requestIsSignTypedData
+          || requestIsSignTransaction
+          || requestIsSignAllTransactions
+          || requestIsSignAndSendTransaction
+          || requestIsCosmosSignDirect
+          || requestIsCosmosSignAmino)
+        && !mnemonic
+      ) {
+        throw new Error('Wallet is locked')
+      }
+
       const tx = requestIsAssetSend
         ? await sendAssetTransfer({
             assetId: requestAssetId,
             qty: requestAmount,
             toAddress: requestTo,
             memo: requestMemo
+          })
+        : requestIsSignMessage
+        ? await (async () => {
+            const ecosystem = String(requestPayload?.ecosystem || '').trim().toLowerCase()
+            if (ecosystem === 'solana' || requestModelId === 'sol') {
+              return await signSolanaMessage({
+                mnemonic,
+                accountIndex,
+                messageBase64: String(requestPayload?.messageBase64 || '')
+              })
+            }
+            return {
+              signature: await signEvmMessage({
+                mnemonic,
+                accountIndex,
+                message: String(requestPayload?.message || ''),
+                encoding: String(requestPayload?.encoding || 'utf8').trim().toLowerCase() === 'hex' ? 'hex' : 'utf8'
+              })
+            }
+          })()
+        : requestIsSignTypedData
+        ? {
+            signature: await signEvmTypedData({
+              mnemonic,
+              accountIndex,
+              typedData: requestPayload?.typedData
+            })
+          }
+        : requestIsSignTransaction
+        ? await (async () => {
+            const ecosystem = String(requestPayload?.ecosystem || '').trim().toLowerCase()
+            if (ecosystem === 'solana' || requestModelId === 'sol') {
+              return {
+                signedTxBase64: await signSolanaTransaction({
+                  mnemonic,
+                  accountIndex,
+                  serializedTxBase64: String(requestPayload?.serializedTxBase64 || '')
+                })
+              }
+            }
+            return {
+              signedTransaction: await signEvmTransaction({
+                mnemonic,
+                accountIndex,
+                tx: requestPayload?.tx || requestPayload || {}
+              })
+            }
+          })()
+        : requestIsSignAllTransactions
+        ? {
+            signedTxsBase64: await signSolanaTransactions({
+              mnemonic,
+              accountIndex,
+              serializedTxsBase64: Array.isArray(requestPayload?.serializedTxsBase64)
+                ? requestPayload.serializedTxsBase64.map((row: unknown) => String(row || ''))
+                : []
+            })
+          }
+        : requestIsSignAndSendTransaction
+        ? await (async () => {
+            const ecosystem = String(requestPayload?.ecosystem || '').trim().toLowerCase()
+            if (ecosystem === 'evm') {
+              return await signAndSendEvmTransaction({
+                mnemonic,
+                accountIndex,
+                rpcUrl: String(requestNetwork?.rpcUrl || ''),
+                tx: requestPayload?.tx || requestPayload || {}
+              })
+            }
+            return await signAndSendSolanaTransaction({
+              mnemonic,
+              accountIndex,
+              rpcUrl: String(requestNetwork?.rpcUrl || ''),
+              serializedTxBase64: String(requestPayload?.serializedTxBase64 || '')
+            })
+          })()
+        : requestIsCosmosSignDirect
+        ? await signCosmosDirect({
+            mnemonic,
+            accountIndex,
+            network: requestNetwork,
+            signDoc: requestPayload?.signDoc
+          })
+        : requestIsCosmosSignAmino
+        ? await signCosmosAmino({
+            mnemonic,
+            accountIndex,
+            network: requestNetwork,
+            signDoc: requestPayload?.signDoc
+          })
+        : requestIsCosmosGetKey
+        ? await deriveCosmosKeyData({
+            mnemonic,
+            accountIndex,
+            network: requestNetwork
+          })
+        : requestIsCosmosSendTx
+        ? await broadcastCosmosTx({
+            rpcUrl: String(requestNetwork?.rpcUrl || ''),
+            txBytesBase64: String(requestPayload?.txBytesBase64 || ''),
+            mode:
+              requestPayload?.mode === 'BROADCAST_MODE_SYNC'
+              || requestPayload?.mode === 'BROADCAST_MODE_ASYNC'
+              || requestPayload?.mode === 'BROADCAST_MODE_BLOCK'
+                ? requestPayload.mode
+                : undefined
           })
         : requestNetwork.coinType === 'EVM'
         ? await sendEvmTransaction({
@@ -234,8 +466,18 @@ const DappRequestConfirm: React.FC = () => {
                   amount: requestAmount
                 })
           })
+        : requestNetwork.coinType === 'XRP'
+        ? await sendXrpTransaction({
+            to: requestTo,
+            amount: requestAmount
+          })
         : requestModelId === 'ada'
         ? await sendCardanoTransaction({
+            to: requestTo,
+            amount: requestAmount
+          })
+        : requestModelId === 'xmr'
+        ? await sendMoneroTransaction({
             to: requestTo,
             amount: requestAmount
           })
@@ -265,40 +507,42 @@ const DappRequestConfirm: React.FC = () => {
           amount: requestAmount,
           memo: requestMemo
         })
-      const txHash = String((tx as any)?.hash || (tx as any)?.txid || '').trim()
-      if (!txHash) throw new Error('Transaction hash is missing from wallet response')
+      const txHash = String((tx as any)?.hash || (tx as any)?.txid || (tx as any)?.signature || (tx as any)?.txhash || '').trim()
 
-      const latestState = useWalletStore.getState()
-      const networkForActivity = latestState.networks.find((n) => n.id === pendingRequest.networkId) || latestState.networks[0]
-      const accountForActivity = latestState.accounts.find((a) => a.id === pendingRequest.accountId) || latestState.accounts[0]
-      const senderAddress = String(
-        accountForActivity?.networkAddresses?.[pendingRequest.networkId]
-        || (networkForActivity?.coinType === 'EVM' ? accountForActivity?.addresses?.EVM : '')
-        || ''
-      ).trim()
+      if (txHash && !requestIsSignMessage && !requestIsSignTypedData && !requestIsSignTransaction && !requestIsSignAllTransactions && !requestIsCosmosSignDirect && !requestIsCosmosSignAmino && !requestIsCosmosGetKey) {
+        const latestState = useWalletStore.getState()
+        const networkForActivity = latestState.networks.find((n) => n.id === pendingRequest.networkId) || latestState.networks[0]
+        const accountForActivity = latestState.accounts.find((a) => a.id === pendingRequest.accountId) || latestState.accounts[0]
+        const senderAddress = String(
+          accountForActivity?.networkAddresses?.[pendingRequest.networkId]
+          || (networkForActivity?.coinType === 'EVM' ? accountForActivity?.addresses?.EVM : '')
+          || (networkForActivity?.coinType === 'XRP' ? accountForActivity?.addresses?.XRP : '')
+          || ''
+        ).trim()
 
-      if (networkForActivity) {
-        addActivity({
-          id: txHash,
-          type: 'sent',
-          asset: requestIsAssetSend ? requestAssetId : networkForActivity.symbol,
-          amount: requestAmount,
-          from: senderAddress,
-          to: requestIsEvmTx && requestTo === 'Contract Creation' ? undefined : requestTo,
-          accountId: pendingRequest.accountId,
-          status: 'pending',
-          timestamp: Date.now(),
-          networkId: networkForActivity.id
-        })
-        trackActivityTransactionStatus({ txid: txHash, networkId: networkForActivity.id })
+        if (networkForActivity) {
+          addActivity({
+            id: txHash,
+            type: 'sent',
+            asset: requestIsAssetSend ? requestAssetId : networkForActivity.symbol,
+            amount: requestAmount || '0',
+            from: senderAddress,
+            to: requestIsEvmTx && requestTo === 'Contract Creation' ? undefined : requestTo || undefined,
+            accountId: pendingRequest.accountId,
+            status: 'pending',
+            timestamp: Date.now(),
+            networkId: networkForActivity.id
+          })
+          trackActivityTransactionStatus({ txid: txHash, networkId: networkForActivity.id })
+        }
+        await refreshActiveBalance()
       }
-      await refreshActiveBalance()
 
       await chrome.storage.local.set({
         [DAPP_PENDING_REQUEST_STORAGE_KEY]: {
           ...pendingRequest,
           status: 'executed',
-          result: { hash: txHash, txid: txHash },
+          result: tx,
           updatedAt: Date.now()
         }
       })
@@ -361,15 +605,19 @@ const DappRequestConfirm: React.FC = () => {
             <div className="p-4 rounded-xl border border-dark-600 bg-dark-700/50 space-y-3">
               <Row label="Network" value={requestNetwork?.name || pendingRequest.networkId} />
               <Row label="Runtime Model" value={String(requestNetwork?.runtimeModelId || requestNetwork?.id || 'unknown')} mono />
+              <Row label="Method" value={requestMethod} mono />
               <Row label="Type" value={requestTypeLabel} />
-              <Row label="To" value={requestTo} mono />
+              {requestTo ? <Row label="To" value={requestTo} mono /> : null}
               {requestIsAssetSend ? <Row label="Asset" value={requestAssetId} mono /> : null}
-              <Row
-                label={requestIsEvmTx ? 'Value' : 'Amount'}
-                value={`${requestAmount} ${requestIsAssetSend ? '' : (requestNetwork?.symbol || '')}`.trim()}
-              />
+              {requestAmount ? (
+                <Row
+                  label={requestIsEvmTx ? 'Value' : 'Amount'}
+                  value={`${requestAmount} ${requestIsAssetSend ? '' : (requestNetwork?.symbol || '')}`.trim()}
+                />
+              ) : null}
               {requestMemo ? <Row label="Memo" value={requestMemo} mono /> : null}
               {requestData ? <Row label="Data" value={requestData} mono /> : null}
+              {requestPreview ? <Row label="Preview" value={requestPreview} mono /> : null}
               {requestGasLimit ? <Row label="Gas Limit" value={requestGasLimit} mono /> : null}
               {requestGasPrice ? <Row label="Gas Price" value={requestGasPrice} mono /> : null}
               {requestMaxFeePerGas ? <Row label="Max Fee" value={requestMaxFeePerGas} mono /> : null}

@@ -8,6 +8,11 @@ import {
   recordRuntimeError
 } from '../lib/runtimeErrorMonitor'
 import {
+  clearBridgeTraceLog,
+  getBridgeTraceLog,
+  recordBridgeTrace
+} from '../lib/bridgeTrace'
+import {
   DAPP_BLOCKED_INTERNAL_ORIGIN_MESSAGE,
   DAPP_APPROVAL_TIMEOUT_MS,
   DAPP_PENDING_APPROVAL_STORAGE_KEY,
@@ -23,14 +28,14 @@ import {
   type DappPendingRequest,
   type DappPermission,
   type DappRequestError,
-  type DappRequestResult,
+  type DappRequestMethod,
   type DappScope
 } from '../lib/dappPermissions'
 import { isPersistedStateEnvelope, unwrapPersistedState, WALLET_STORAGE_KEY } from '../lib/walletStorage'
 import { resolveNetworkCapabilities } from '../lib/networkCapabilities'
 
 const BG_EVENT_PORT_NAME = 'metayoshi-inpage-events'
-const DEFAULT_NETWORK_ID = String(import.meta.env.VITE_DEFAULT_NETWORK || 'sol').trim() || 'sol'
+const DEFAULT_NETWORK_ID = String(import.meta.env.VITE_DEFAULT_NETWORK || 'rtm').trim() || 'rtm'
 const APP_POPUP_WIDTH = 380
 // Chrome window bounds use integer pixels; 663.2px requested by product is rounded to 663px.
 const APP_POPUP_HEIGHT = 663
@@ -66,6 +71,8 @@ type DappRequest = {
 type MonitorRequest =
   | { type: 'METAYOSHI_MONITOR_GET_ERRORS' }
   | { type: 'METAYOSHI_MONITOR_CLEAR_ERRORS' }
+  | { type: 'METAYOSHI_MONITOR_GET_BRIDGE_TRACE' }
+  | { type: 'METAYOSHI_MONITOR_CLEAR_BRIDGE_TRACE' }
 
 type SendTransactionParams =
   | {
@@ -98,43 +105,26 @@ const NETWORKS_METHODS = new Set(['wallet_getNetworks', 'metayoshi_getNetworks',
 const REQUEST_ACCOUNTS_METHODS = new Set(['wallet_requestAccounts', 'metayoshi_requestAccounts', 'rtm_requestAccounts'])
 const ACCOUNTS_METHODS = new Set(['wallet_accounts', 'metayoshi_accounts', 'rtm_accounts'])
 const SIGN_MESSAGE_METHODS = new Set(['wallet_signMessage', 'metayoshi_signMessage', 'rtm_signMessage'])
+const SIGN_TYPED_DATA_METHODS = new Set(['wallet_signTypedData'])
+const SIGN_TRANSACTION_METHODS = new Set(['wallet_signTransaction'])
+const SIGN_ALL_TRANSACTIONS_METHODS = new Set(['wallet_signAllTransactions'])
+const SIGN_AND_SEND_TRANSACTION_METHODS = new Set(['wallet_signAndSendTransaction'])
+const COSMOS_GET_KEY_METHODS = new Set(['wallet_cosmosGetKey'])
+const COSMOS_SIGN_DIRECT_METHODS = new Set(['wallet_cosmosSignDirect'])
+const COSMOS_SIGN_AMINO_METHODS = new Set(['wallet_cosmosSignAmino'])
+const COSMOS_SEND_TX_METHODS = new Set(['wallet_cosmosSendTx'])
 const SEND_TRANSACTION_METHODS = new Set(['wallet_sendTransaction', 'metayoshi_sendTransaction', 'rtm_sendTransaction'])
 const SEND_ASSET_METHODS = new Set(['wallet_sendAsset', 'metayoshi_sendAsset', 'rtm_sendAsset'])
 const SELECT_ACCOUNT_METHODS = new Set(['wallet_selectAccount', 'metayoshi_selectAccount', 'rtm_selectAccount'])
 const SWITCH_NETWORK_METHODS = new Set(['wallet_switchNetwork', 'metayoshi_switchNetwork', 'rtm_switchNetwork'])
-const DAPP_SDK_METHODS = [
-  'wallet_getProviderState',
-  'metayoshi_getProviderState',
-  'rtm_getProviderState',
-  'wallet_requestAccounts',
-  'metayoshi_requestAccounts',
-  'rtm_requestAccounts',
-  'wallet_accounts',
-  'metayoshi_accounts',
-  'rtm_accounts',
-  'wallet_connect',
-  'metayoshi_connect',
-  'rtm_connect',
-  'wallet_selectAccount',
-  'metayoshi_selectAccount',
-  'rtm_selectAccount',
-  'wallet_switchNetwork',
-  'metayoshi_switchNetwork',
-  'rtm_switchNetwork',
-  'wallet_getNetworks',
-  'metayoshi_getNetworks',
-  'rtm_getNetworks',
-  'wallet_getCapabilities',
-  'metayoshi_getCapabilities',
-  'rtm_getCapabilities',
-  'wallet_sendTransaction',
-  'metayoshi_sendTransaction',
-  'rtm_sendTransaction',
-  'wallet_sendAsset',
-  'metayoshi_sendAsset',
-  'rtm_sendAsset'
-] as const
-
+const ETHEREUM_ACCOUNTS_METHODS = new Set(['eth_accounts'])
+const ETHEREUM_REQUEST_ACCOUNTS_METHODS = new Set(['eth_requestAccounts'])
+const ETHEREUM_CHAIN_ID_METHODS = new Set(['eth_chainId'])
+const ETHEREUM_SWITCH_CHAIN_METHODS = new Set(['wallet_switchEthereumChain'])
+const ETHEREUM_ADD_CHAIN_METHODS = new Set(['wallet_addEthereumChain'])
+const ETHEREUM_SEND_TRANSACTION_METHODS = new Set(['eth_sendTransaction'])
+const ETHEREUM_SIGN_METHODS = new Set(['personal_sign', 'eth_sign'])
+const ETHEREUM_SIGN_TYPED_DATA_METHODS = new Set(['eth_signTypedData', 'eth_signTypedData_v3', 'eth_signTypedData_v4'])
 // Event ports for broadcasting events to content scripts
 const eventPorts = new Set<chrome.runtime.Port>()
 
@@ -144,7 +134,7 @@ interface WalletState {
   hasVault?: boolean
   accounts?: Array<{
     id: string
-    addresses: { EVM?: string; UTXO?: string; COSMOS?: string }
+    addresses: { EVM?: string; UTXO?: string; XRP?: string; COSMOS?: string }
     networkAddresses?: Record<string, string>
   }>
   activeAccountId?: string | null
@@ -169,6 +159,21 @@ type DappNetworkDescriptor = {
     activity: boolean
   }
 }
+
+type DappMethodMatrix = {
+  signMessage: boolean
+  signTypedData: boolean
+  signTransaction: boolean
+  signAllTransactions: boolean
+  signAndSendTransaction: boolean
+  cosmosGetKey: boolean
+  cosmosSignDirect: boolean
+  cosmosSignAmino: boolean
+  cosmosSendTx: boolean
+  methods: string[]
+}
+
+type DappProtocol = 'evm-jsonrpc' | 'solana-jsonrpc' | 'cosmos-rest-bridge' | 'generic'
 
 function buildDappNetworkDescriptor(
   network: DappNetworkEntry,
@@ -203,6 +208,35 @@ function getRpcParamObject(params: unknown): Record<string, unknown> | null {
   const candidate = Array.isArray(params) ? params[0] : params
   if (!candidate || typeof candidate !== 'object') return null
   return candidate as Record<string, unknown>
+}
+
+function resolveDappProtocol(network?: DappNetworkEntry | null): DappProtocol {
+  const coinType = String(network?.coinType || '').trim().toUpperCase()
+  const runtimeModelId = String(network?.runtimeModelId || '').trim().toLowerCase()
+  const networkId = String(network?.id || '').trim().toLowerCase()
+
+  if (coinType === 'EVM') return 'evm-jsonrpc'
+  if (
+    coinType === 'SOL'
+    || runtimeModelId === 'sol'
+    || runtimeModelId === 'solana'
+    || networkId === 'sol'
+    || networkId === 'solana'
+    || networkId === 'srv--solana-testnet'
+  ) {
+    return 'solana-jsonrpc'
+  }
+  if (
+    coinType === 'COSMOS'
+    || runtimeModelId === 'cosmos'
+    || runtimeModelId === 'cro'
+    || networkId === 'cosmos'
+    || networkId === 'cro'
+  ) {
+    return 'cosmos-rest-bridge'
+  }
+
+  return 'generic'
 }
 
 function parseRequestedChainId(value: unknown): number | null {
@@ -274,10 +308,12 @@ function resolveCoinDecimals(network?: { coinType?: string; symbol?: string; id?
   const symbol = String(network?.symbol || '').trim().toUpperCase()
   const id = String(network?.id || '').trim().toLowerCase()
   if (network?.coinType === 'EVM') return 18
+  if (network?.coinType === 'XRP') return 6
   if (network?.coinType === 'SOL' || symbol === 'SOL' || id === 'sol' || id === 'solana' || id === 'srv--solana-testnet') return 9
   if (symbol === 'XLM' || id === 'xlm' || id === 'stellar') return 7
   if (symbol === 'TRX' || id === 'tron') return 6
   if (symbol === 'ADA' || id === 'ada') return 6
+  if (symbol === 'XMR' || id === 'xmr') return 12
   return 8
 }
 
@@ -356,13 +392,38 @@ function getActiveAddressFromState(state: WalletState, networkId: string): strin
   if (network.coinType === 'EVM') {
     return account.addresses?.EVM || null
   }
+  if (network.coinType === 'XRP') {
+    return account.addresses?.XRP || null
+  }
   if (network.coinType === 'COSMOS') {
     return account.addresses?.COSMOS || null
   }
   if (network.coinType === 'UTXO') {
     return account.addresses?.UTXO || null
   }
+  if (network.coinType === 'SOL') {
+    return (account.addresses as any)?.SOL || null
+  }
+  if (network.coinType === 'SUI') {
+    return (account.addresses as any)?.SUI || null
+  }
   return null
+}
+
+function findNetworkByCoinType(state: WalletState, coinType: string): DappNetworkEntry | undefined {
+  const normalizedCoinType = String(coinType || '').trim().toUpperCase()
+  const dappNetworks = resolveDappNetworks(state)
+  const active = dappNetworks.find((entry) => entry.id === state.activeNetworkId && String(entry.coinType || '').trim().toUpperCase() === normalizedCoinType)
+  if (active) return active
+  return dappNetworks.find((entry) => String(entry.coinType || '').trim().toUpperCase() === normalizedCoinType)
+}
+
+function findNetworkByRuntimeModel(state: WalletState, modelId: string): DappNetworkEntry | undefined {
+  const normalizedModelId = String(modelId || '').trim().toLowerCase()
+  const dappNetworks = resolveDappNetworks(state)
+  const active = dappNetworks.find((entry) => entry.id === state.activeNetworkId && String(entry.runtimeModelId || '').trim().toLowerCase() === normalizedModelId)
+  if (active) return active
+  return dappNetworks.find((entry) => String(entry.runtimeModelId || '').trim().toLowerCase() === normalizedModelId)
 }
 
 // Get active account address based on network type
@@ -501,12 +562,27 @@ function buildApprovalPopupUrl(): string {
   return buildPopupRouteUrl('/dapp/connect/1')
 }
 
-function buildRequestPopupUrl(requestId: string): string {
-  return buildPopupRouteUrl(`/dapp/request/confirm?id=${encodeURIComponent(requestId)}`)
+function isWalletTxConfirmRequest(
+  method: DappRequestMethod,
+  request: unknown
+): boolean {
+  if (method === 'wallet_sendAsset') return true
+  if (method !== 'wallet_sendTransaction' || !request || typeof request !== 'object') return false
+
+  const candidate = request as Record<string, unknown>
+  const data = String(candidate.data || '').trim()
+  if (data) return false
+
+  const to = String(candidate.to || '').trim()
+  const amount = String(candidate.amount || candidate.value || '').trim()
+  return Boolean(to && amount)
 }
 
-function buildUnlockPopupUrl(): string {
-  return buildPopupRouteUrl('/unlock')
+function buildRequestPopupUrl(requestId: string, method: DappRequestMethod, request: unknown): string {
+  if (isWalletTxConfirmRequest(method, request)) {
+    return buildPopupRouteUrl(`/tx/confirm?dappRequest=1&id=${encodeURIComponent(requestId)}`)
+  }
+  return buildPopupRouteUrl(`/dapp/request/confirm?id=${encodeURIComponent(requestId)}`)
 }
 
 function buildPopupRouteUrl(route: string): string {
@@ -527,12 +603,8 @@ async function openApprovalPopup(): Promise<void> {
   await openManagedPopup(buildApprovalPopupUrl())
 }
 
-async function openRequestPopup(requestId: string): Promise<void> {
-  await openManagedPopup(buildRequestPopupUrl(requestId))
-}
-
-async function openUnlockPopup(): Promise<void> {
-  await openManagedPopup(buildUnlockPopupUrl())
+async function openRequestPopup(requestId: string, method: DappRequestMethod, request: unknown): Promise<void> {
+  await openManagedPopup(buildRequestPopupUrl(requestId, method, request))
 }
 
 async function openManagedPopup(url: string): Promise<void> {
@@ -734,6 +806,44 @@ async function enforceManagedPopupBounds(windowId: number): Promise<void> {
 type ApprovalDecision = 'approved' | 'rejected' | 'timeout'
 type RequestDecision = 'executed' | 'failed' | 'rejected' | 'timeout'
 
+function stableStringifyForComparison(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringifyForComparison(entry)).join(',')}]`
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringifyForComparison(entryValue)}`)
+    return `{${entries.join(',')}}`
+  }
+  return JSON.stringify(String(value))
+}
+
+function areRequestsEquivalent(left: unknown, right: unknown): boolean {
+  return stableStringifyForComparison(left) === stableStringifyForComparison(right)
+}
+
+function getPendingTimeoutMs(expiresAt: number, fallbackMs: number): number {
+  const remainingMs = Math.max(1000, Math.trunc(Number(expiresAt || 0) - Date.now()))
+  return Number.isFinite(remainingMs) ? remainingMs : fallbackMs
+}
+
+function summarizeTraceValue(value: unknown, maxLength = 180): string | undefined {
+  if (value === undefined) return undefined
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    if (!text) return undefined
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  } catch {
+    const text = String(value)
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  }
+}
+
 async function waitForApprovalDecision(id: string, timeoutMs: number): Promise<ApprovalDecision> {
   return new Promise((resolve) => {
     let settled = false
@@ -771,13 +881,13 @@ async function waitForApprovalDecision(id: string, timeoutMs: number): Promise<A
 async function waitForRequestDecision(
   id: string,
   timeoutMs: number
-): Promise<{ decision: RequestDecision; result?: DappRequestResult; error?: DappRequestError }> {
+): Promise<{ decision: RequestDecision; result?: unknown; error?: DappRequestError }> {
   return new Promise((resolve) => {
     let settled = false
 
     const finish = (
       decision: RequestDecision,
-      result?: DappRequestResult,
+      result?: unknown,
       error?: DappRequestError
     ): void => {
       if (settled) return
@@ -954,13 +1064,257 @@ function parseSendAssetParams(params: unknown): SendAssetParams {
   return memo ? { assetId, qty, toAddress, memo } : { assetId, qty, toAddress }
 }
 
+function parseSignMessageParams(params: unknown): {
+  ecosystem: 'evm' | 'solana'
+  message?: string
+  messageBase64?: string
+  encoding?: 'utf8' | 'hex'
+} {
+  if (Array.isArray(params) && params.length >= 2) {
+    const [first, second] = params
+    const firstText = String(first ?? '').trim()
+    const secondText = String(second ?? '').trim()
+    const firstLooksAddress = /^0x[0-9a-f]{40}$/i.test(firstText)
+    const message = firstLooksAddress ? secondText : firstText
+    return {
+      ecosystem: 'evm',
+      message,
+      encoding: /^0x[0-9a-f]*$/i.test(message) ? 'hex' : 'utf8'
+    }
+  }
+
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_signMessage requires message params' }
+  }
+
+  const payload = candidate as Record<string, unknown>
+  const ecosystem = String(payload.ecosystem || '').trim().toLowerCase() === 'solana' ? 'solana' : 'evm'
+  if (ecosystem === 'solana') {
+    const messageBase64 = String(payload.messageBase64 || '').trim()
+    if (!messageBase64) {
+      throw { code: -32602, message: 'wallet_signMessage requires `messageBase64` for Solana payloads' }
+    }
+    return { ecosystem, messageBase64 }
+  }
+
+  const message = String(payload.message ?? payload.data ?? '').trim()
+  if (!message) {
+    throw { code: -32602, message: 'wallet_signMessage requires `message`' }
+  }
+  return {
+    ecosystem,
+    message,
+    encoding: String(payload.encoding || '').trim().toLowerCase() === 'hex' || /^0x[0-9a-f]*$/i.test(message) ? 'hex' : 'utf8'
+  }
+}
+
+function resolveDappMethodMatrix(network?: DappNetworkEntry | null): DappMethodMatrix {
+  const methods = new Set<string>([
+    'wallet_getProviderState',
+    'metayoshi_getProviderState',
+    'rtm_getProviderState',
+    'wallet_requestAccounts',
+    'metayoshi_requestAccounts',
+    'rtm_requestAccounts',
+    'wallet_accounts',
+    'metayoshi_accounts',
+    'rtm_accounts',
+    'wallet_connect',
+    'metayoshi_connect',
+    'rtm_connect',
+    'wallet_selectAccount',
+    'metayoshi_selectAccount',
+    'rtm_selectAccount',
+    'wallet_switchNetwork',
+    'metayoshi_switchNetwork',
+    'rtm_switchNetwork',
+    'wallet_getNetworks',
+    'metayoshi_getNetworks',
+    'rtm_getNetworks',
+    'wallet_getCapabilities',
+    'metayoshi_getCapabilities',
+    'rtm_getCapabilities',
+    'wallet_sendTransaction',
+    'metayoshi_sendTransaction',
+    'rtm_sendTransaction',
+    'wallet_sendAsset',
+    'metayoshi_sendAsset',
+    'rtm_sendAsset'
+  ])
+  const protocol = resolveDappProtocol(network)
+  const matrix: DappMethodMatrix = {
+    signMessage: false,
+    signTypedData: false,
+    signTransaction: false,
+    signAllTransactions: false,
+    signAndSendTransaction: false,
+    cosmosGetKey: false,
+    cosmosSignDirect: false,
+    cosmosSignAmino: false,
+    cosmosSendTx: false,
+    methods: []
+  }
+
+  if (protocol === 'evm-jsonrpc') {
+    matrix.signMessage = true
+    matrix.signTypedData = true
+    matrix.signTransaction = true
+    matrix.signAndSendTransaction = true
+    ;[
+      'wallet_signMessage',
+      'wallet_signTypedData',
+      'wallet_signTransaction',
+      'wallet_signAndSendTransaction',
+      'eth_accounts',
+      'eth_requestAccounts',
+      'eth_chainId',
+      'wallet_switchEthereumChain',
+      'wallet_addEthereumChain',
+      'eth_sendTransaction',
+      'personal_sign',
+      'eth_sign',
+      'eth_signTypedData',
+      'eth_signTypedData_v3',
+      'eth_signTypedData_v4'
+    ].forEach((method) => methods.add(method))
+  } else if (protocol === 'solana-jsonrpc') {
+    matrix.signMessage = true
+    matrix.signTransaction = true
+    matrix.signAllTransactions = true
+    matrix.signAndSendTransaction = true
+    ;[
+      'wallet_signMessage',
+      'wallet_signTransaction',
+      'wallet_signAllTransactions',
+      'wallet_signAndSendTransaction'
+    ].forEach((method) => methods.add(method))
+  } else if (protocol === 'cosmos-rest-bridge') {
+    matrix.cosmosGetKey = true
+    matrix.cosmosSignDirect = true
+    matrix.cosmosSignAmino = true
+    matrix.cosmosSendTx = true
+    ;[
+      'wallet_cosmosGetKey',
+      'wallet_cosmosSignDirect',
+      'wallet_cosmosSignAmino',
+      'wallet_cosmosSendTx'
+    ].forEach((method) => methods.add(method))
+  }
+
+  matrix.methods = [...methods]
+  return matrix
+}
+
+function parseSignTypedDataParams(params: unknown): { typedData: unknown } {
+  const payload = Array.isArray(params)
+    ? (params.length >= 2 ? params[1] : params[0])
+    : params
+  if (payload === undefined || payload === null) {
+    throw { code: -32602, message: 'wallet_signTypedData requires typed data params' }
+  }
+  return { typedData: payload }
+}
+
+function parseEvmTransactionRequest(params: unknown): { tx: Record<string, unknown> } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'eth_sendTransaction requires a transaction object' }
+  }
+  return { tx: candidate as Record<string, unknown> }
+}
+
+function parseSignTransactionParams(params: unknown): { ecosystem: 'evm' | 'solana'; tx?: Record<string, unknown>; serializedTxBase64?: string } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_signTransaction requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  const ecosystem = String(payload.ecosystem || '').trim().toLowerCase() === 'solana' ? 'solana' : 'evm'
+  if (ecosystem === 'solana') {
+    const serializedTxBase64 = String(payload.serializedTxBase64 || '').trim()
+    if (!serializedTxBase64) throw { code: -32602, message: 'wallet_signTransaction requires `serializedTxBase64` for Solana payloads' }
+    return { ecosystem, serializedTxBase64 }
+  }
+  return { ecosystem, tx: payload.tx && typeof payload.tx === 'object' ? payload.tx as Record<string, unknown> : payload }
+}
+
+function parseSignAllTransactionsParams(params: unknown): { ecosystem: 'solana'; serializedTxsBase64: string[] } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_signAllTransactions requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  const serializedTxsBase64 = Array.isArray(payload.serializedTxsBase64)
+    ? payload.serializedTxsBase64.map((entry) => String(entry || '').trim()).filter(Boolean)
+    : []
+  if (serializedTxsBase64.length === 0) {
+    throw { code: -32602, message: 'wallet_signAllTransactions requires `serializedTxsBase64`' }
+  }
+  return { ecosystem: 'solana', serializedTxsBase64 }
+}
+
+function parseSignAndSendTransactionParams(params: unknown): { ecosystem: 'solana'; serializedTxBase64: string } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_signAndSendTransaction requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  const serializedTxBase64 = String(payload.serializedTxBase64 || '').trim()
+  if (!serializedTxBase64) {
+    throw { code: -32602, message: 'wallet_signAndSendTransaction requires `serializedTxBase64`' }
+  }
+  return { ecosystem: 'solana', serializedTxBase64 }
+}
+
+function parseCosmosSignDirectParams(params: unknown): { signDoc: any } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_cosmosSignDirect requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  if (!payload.signDoc || typeof payload.signDoc !== 'object') {
+    throw { code: -32602, message: 'wallet_cosmosSignDirect requires `signDoc`' }
+  }
+  return { signDoc: payload.signDoc }
+}
+
+function parseCosmosSignAminoParams(params: unknown): { signDoc: any } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_cosmosSignAmino requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  if (!payload.signDoc || typeof payload.signDoc !== 'object') {
+    throw { code: -32602, message: 'wallet_cosmosSignAmino requires `signDoc`' }
+  }
+  return { signDoc: payload.signDoc }
+}
+
+function parseCosmosSendTxParams(params: unknown): { txBytesBase64: string; mode?: 'BROADCAST_MODE_SYNC' | 'BROADCAST_MODE_ASYNC' | 'BROADCAST_MODE_BLOCK' } {
+  const candidate = Array.isArray(params) ? params[0] : params
+  if (!candidate || typeof candidate !== 'object') {
+    throw { code: -32602, message: 'wallet_cosmosSendTx requires params' }
+  }
+  const payload = candidate as Record<string, unknown>
+  const txBytesBase64 = String(payload.txBytesBase64 || payload.tx || '').trim()
+  if (!txBytesBase64) {
+    throw { code: -32602, message: 'wallet_cosmosSendTx requires `txBytesBase64`' }
+  }
+  const modeRaw = String(payload.mode || '').trim().toUpperCase()
+  const mode = modeRaw === 'BROADCAST_MODE_BLOCK' || modeRaw === 'BROADCAST_MODE_ASYNC' || modeRaw === 'BROADCAST_MODE_SYNC'
+    ? modeRaw as 'BROADCAST_MODE_SYNC' | 'BROADCAST_MODE_ASYNC' | 'BROADCAST_MODE_BLOCK'
+    : undefined
+  return { txBytesBase64, ...(mode ? { mode } : {}) }
+}
+
 async function requestDappActionApproval(
   origin: string,
   networkId: string,
   accountId: string,
-  method: 'wallet_sendTransaction' | 'wallet_sendAsset',
-  request: SendTransactionParams | SendAssetParams
-): Promise<DappRequestResult> {
+  method: DappRequestMethod,
+  request: unknown
+): Promise<unknown> {
   const normalizedOrigin = normalizeDappOrigin(origin)
   if (!normalizedOrigin || normalizedOrigin === 'unknown') {
     throw { code: 4001, message: 'Untrusted origin' }
@@ -968,7 +1322,51 @@ async function requestDappActionApproval(
 
   const now = Date.now()
   const pending = await getPendingRequest()
-  if (pending && pending.status === 'pending' && pending.expiresAt > now) {
+  const pendingRequestActive =
+    Boolean(pending)
+    && (pending?.status === 'pending' || pending?.status === 'approved')
+    && pending.expiresAt > now
+
+  if (pending && pendingRequestActive) {
+    const sameRequest =
+      pending.origin === normalizedOrigin
+      && pending.networkId === networkId
+      && pending.accountId === accountId
+      && pending.method === method
+      && areRequestsEquivalent(pending.request, request)
+
+    if (sameRequest) {
+      void recordBridgeTrace('background-sw', 'request-approval-reuse', {
+        requestId: pending.id,
+        origin: normalizedOrigin,
+        method,
+        status: pending.status
+      })
+      const existingPopup = pending.status === 'pending' ? await findManagedPopupWindow() : null
+      if (pending.status === 'pending' && !existingPopup?.id) {
+        try {
+          await openRequestPopup(pending.id, pending.method, pending.request)
+        } catch {
+          // Preserve the original pending request and keep waiting for it.
+        }
+      }
+      const decision = await waitForRequestDecision(
+        pending.id,
+        getPendingTimeoutMs(pending.expiresAt, DAPP_APPROVAL_TIMEOUT_MS)
+      )
+      if (decision.decision === 'executed' && decision.result) {
+        await clearPendingRequestIfMatch(pending.id)
+        return decision.result
+      }
+      await clearPendingRequestIfMatch(pending.id)
+      if (decision.decision === 'rejected' || decision.decision === 'timeout') {
+        throw { code: 4001, message: 'User rejected the request' }
+      }
+      throw {
+        code: decision.error?.code ?? -32603,
+        message: decision.error?.message ?? 'Transaction failed'
+      }
+    }
     throw { code: 4001, message: 'Another wallet request is already pending approval' }
   }
 
@@ -987,15 +1385,29 @@ async function requestDappActionApproval(
   }
 
   await setPendingRequest(nextPending)
+  void recordBridgeTrace('background-sw', 'request-approval-created', {
+    requestId,
+    origin: normalizedOrigin,
+    method,
+    networkId,
+    accountId,
+    request: summarizeTraceValue(request)
+  })
 
   try {
-    await openRequestPopup(requestId)
+    await openRequestPopup(requestId, method, request)
   } catch {
     await clearPendingRequestIfMatch(requestId)
     throw { code: 4001, message: 'Unable to open wallet approval popup' }
   }
 
   const decision = await waitForRequestDecision(requestId, DAPP_APPROVAL_TIMEOUT_MS)
+  void recordBridgeTrace('background-sw', 'request-approval-decision', {
+    requestId,
+    decision: decision.decision,
+    errorCode: decision.error?.code,
+    errorMessage: decision.error?.message
+  })
   if (decision.decision === 'executed' && decision.result) {
     await clearPendingRequestIfMatch(requestId)
     return decision.result
@@ -1034,6 +1446,11 @@ async function requestScopes(
 
   const now = Date.now()
   const pending = await getPendingApproval()
+  const reuseExistingApproval =
+    Boolean(pending)
+    && pending?.status === 'pending'
+    && pending?.origin === normalizedOrigin
+    && pending.expiresAt > now
 
   if (
     pending &&
@@ -1060,15 +1477,35 @@ async function requestScopes(
   }
 
   await setPendingApproval(nextPending)
+  void recordBridgeTrace('background-sw', 'scope-approval-upsert', {
+    approvalId,
+    origin: normalizedOrigin,
+    scopes: nextPending.scopes,
+    networkId: nextPending.networkId,
+    reused: reuseExistingApproval
+  })
 
   try {
-    await openApprovalPopup()
+    const existingPopup = reuseExistingApproval ? await findManagedPopupWindow() : null
+    if (!existingPopup?.id) {
+      await openApprovalPopup()
+    }
   } catch {
     await clearPendingApprovalIfMatch(approvalId)
     return false
   }
 
-  const decision = await waitForApprovalDecision(approvalId, DAPP_APPROVAL_TIMEOUT_MS)
+  const decision = await waitForApprovalDecision(
+    approvalId,
+    reuseExistingApproval
+      ? getPendingTimeoutMs(nextPending.expiresAt, DAPP_APPROVAL_TIMEOUT_MS)
+      : DAPP_APPROVAL_TIMEOUT_MS
+  )
+  void recordBridgeTrace('background-sw', 'scope-approval-decision', {
+    approvalId,
+    origin: normalizedOrigin,
+    decision
+  })
   if (decision !== 'approved') {
     await clearPendingApprovalIfMatch(approvalId)
     return false
@@ -1159,7 +1596,36 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
     }
   }
 
-  const runtime = buildDappRuntimeContext(walletState, requestedNetwork.network?.id)
+  let runtimeNetworkId = requestedNetwork.network?.id
+  if (!runtimeNetworkId && (
+    ETHEREUM_ACCOUNTS_METHODS.has(method)
+    || ETHEREUM_REQUEST_ACCOUNTS_METHODS.has(method)
+    || ETHEREUM_CHAIN_ID_METHODS.has(method)
+    || ETHEREUM_SWITCH_CHAIN_METHODS.has(method)
+    || ETHEREUM_ADD_CHAIN_METHODS.has(method)
+    || ETHEREUM_SEND_TRANSACTION_METHODS.has(method)
+    || ETHEREUM_SIGN_METHODS.has(method)
+    || ETHEREUM_SIGN_TYPED_DATA_METHODS.has(method)
+  )) {
+    runtimeNetworkId = findNetworkByCoinType(walletState, 'EVM')?.id
+  }
+  if (!runtimeNetworkId && (
+    SIGN_TRANSACTION_METHODS.has(method)
+    || SIGN_ALL_TRANSACTIONS_METHODS.has(method)
+    || SIGN_AND_SEND_TRANSACTION_METHODS.has(method)
+  )) {
+    runtimeNetworkId = findNetworkByRuntimeModel(walletState, 'sol')?.id || findNetworkByCoinType(walletState, 'SOL')?.id
+  }
+  if (!runtimeNetworkId && (
+    COSMOS_GET_KEY_METHODS.has(method)
+    || COSMOS_SIGN_DIRECT_METHODS.has(method)
+    || COSMOS_SIGN_AMINO_METHODS.has(method)
+    || COSMOS_SEND_TX_METHODS.has(method)
+  )) {
+    runtimeNetworkId = findNetworkByCoinType(walletState, 'COSMOS')?.id || findNetworkByRuntimeModel(walletState, 'cosmos')?.id
+  }
+
+  const runtime = buildDappRuntimeContext(walletState, runtimeNetworkId)
   const {
     state,
     network,
@@ -1188,14 +1654,6 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
     if (!(refreshed.state.isInitialized ?? false) || !(refreshed.state.hasVault ?? false)) {
       throw { code: -32603, message: 'Wallet is not initialized' }
     }
-    if (refreshed.state.isLocked ?? true) {
-      try {
-        await openUnlockPopup()
-      } catch {
-        // Ignore popup launch failures and return the lock error to dapp.
-      }
-      throw { code: 4901, message: 'Wallet is locked. Unlock popup opened.' }
-    }
     if (!refreshed.address) {
       throw { code: -32603, message: 'No account available' }
     }
@@ -1204,9 +1662,19 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
 
   if (CAPABILITIES_METHODS.has(method)) {
     const netCaps = resolveNetworkCapabilities(network || {})
+    const methodMatrix = resolveDappMethodMatrix(network)
     const features = {
       nativeSend: Boolean(netCaps.features.nativeSend),
-      signMessage: false,
+      signMessage: Boolean(
+        methodMatrix.signMessage
+        || methodMatrix.signTypedData
+        || methodMatrix.signTransaction
+        || methodMatrix.signAllTransactions
+        || methodMatrix.signAndSendTransaction
+        || methodMatrix.cosmosGetKey
+        || methodMatrix.cosmosSignDirect
+        || methodMatrix.cosmosSignAmino
+      ),
       assetLayer: Boolean(netCaps.features.assetLayer),
       assetSend: Boolean(netCaps.features.assetSend)
     }
@@ -1228,7 +1696,7 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
         select_account: true,
         switch_network: true
       },
-      methods: [...DAPP_SDK_METHODS],
+      methods: methodMatrix.methods,
       networks: dappNetworks.map((n) => buildDappNetworkDescriptor(n, n.id === effectiveNetworkId))
     }
   }
@@ -1251,14 +1719,6 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
     if (!(refreshed.state.isInitialized ?? false) || !(refreshed.state.hasVault ?? false)) {
       throw { code: -32603, message: 'Wallet is not initialized' }
     }
-    if (refreshed.state.isLocked ?? true) {
-      try {
-        await openUnlockPopup()
-      } catch {
-        // Ignore popup launch failures and return the lock error to dapp.
-      }
-      throw { code: 4901, message: 'Wallet is locked. Unlock popup opened.' }
-    }
     if (!refreshed.address) {
       throw { code: -32603, message: 'No account available' }
     }
@@ -1275,9 +1735,294 @@ async function handleRpcMethod(method: string, params: any, origin?: string): Pr
     const currentAddress = getActiveAddressFromState(state, effectiveNetworkId)
     return currentAddress ? [currentAddress] : []
   }
-  
-  if (SIGN_MESSAGE_METHODS.has(method)) {
-    throw { code: -32601, message: `Method not supported: ${method}` }
+
+  if (ETHEREUM_CHAIN_ID_METHODS.has(method)) {
+    if (!network || network.coinType !== 'EVM') {
+      throw { code: 4900, message: 'No EVM network is available' }
+    }
+    return `0x${Number(network.chainId || 0).toString(16)}`
+  }
+
+  if (ETHEREUM_ACCOUNTS_METHODS.has(method)) {
+    if ((state.isLocked ?? true) || !(state.isInitialized ?? false) || !network || network.coinType !== 'EVM') {
+      return []
+    }
+    return address ? [address] : []
+  }
+
+  if (ETHEREUM_REQUEST_ACCOUNTS_METHODS.has(method)) {
+    const approvedOrigin = await requireDappScopes(origin, ['read'])
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    const refreshed = buildDappRuntimeContext(await getWalletState(), network?.id)
+    if (!refreshed.network || refreshed.network.coinType !== 'EVM') {
+      throw { code: 4900, message: 'No EVM network is available' }
+    }
+    await touchLastConnected(approvedOrigin)
+    return refreshed.address ? [refreshed.address] : []
+  }
+
+  if (ETHEREUM_SWITCH_CHAIN_METHODS.has(method)) {
+    const approvedOrigin = await requireDappScopes(origin, ['read', 'switch_network'])
+    const payload = Array.isArray(params) ? params[0] : params
+    const chainId = parseRequestedChainId((payload as Record<string, unknown> | null)?.chainId)
+    if (chainId === null) {
+      throw { code: -32602, message: 'wallet_switchEthereumChain requires `chainId`' }
+    }
+    const nextNetwork = resolveDappNetworks(state).find((entry) => entry.coinType === 'EVM' && entry.chainId === chainId)
+    if (!nextNetwork) {
+      throw { code: 4902, message: `Unknown EVM chain ${chainId}` }
+    }
+    await updateWalletStateInStorage((current) => ({
+      ...current,
+      activeNetworkId: nextNetwork.id
+    }))
+    await touchLastConnected(approvedOrigin)
+    broadcastEvent('networkChanged', {
+      networkId: nextNetwork.id,
+      networkLabel: nextNetwork.name,
+      coinId: nextNetwork.id,
+      coinName: nextNetwork.name,
+      coinSymbol: nextNetwork.symbol,
+      coinDecimals: resolveCoinDecimals(nextNetwork)
+    })
+    return null
+  }
+
+  if (ETHEREUM_ADD_CHAIN_METHODS.has(method)) {
+    const payload = Array.isArray(params) ? params[0] : params
+    const chainId = parseRequestedChainId((payload as Record<string, unknown> | null)?.chainId)
+    if (chainId === null) {
+      throw { code: -32602, message: 'wallet_addEthereumChain requires `chainId`' }
+    }
+    const knownNetwork = resolveDappNetworks(state).find((entry) => entry.coinType === 'EVM' && entry.chainId === chainId)
+    if (!knownNetwork) {
+      throw { code: 4902, message: `Unknown EVM chain ${chainId}` }
+    }
+    return null
+  }
+
+  if (SIGN_MESSAGE_METHODS.has(method) || ETHEREUM_SIGN_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) {
+      throw { code: 4900, message: 'No network is available' }
+    }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) {
+      throw { code: -32603, message: 'No account available' }
+    }
+    const scopes: DappScope[] = ['read', 'sign']
+    if (origin) {
+      const approved = await requestScopes(origin, scopes, { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    const signPayload = parseSignMessageParams(params)
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signMessage',
+      signPayload
+    )
+  }
+
+  if (SIGN_TYPED_DATA_METHODS.has(method) || ETHEREUM_SIGN_TYPED_DATA_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network || network.coinType !== 'EVM') {
+      throw { code: 4900, message: 'No EVM network is available' }
+    }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) {
+      throw { code: -32603, message: 'No account available' }
+    }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signTypedData',
+      parseSignTypedDataParams(params)
+    )
+  }
+
+  if (SIGN_TRANSACTION_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signTransaction',
+      parseSignTransactionParams(params)
+    )
+  }
+
+  if (SIGN_ALL_TRANSACTIONS_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signAllTransactions',
+      parseSignAllTransactionsParams(params)
+    )
+  }
+
+  if (SIGN_AND_SEND_TRANSACTION_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign', 'send_coin'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signAndSendTransaction',
+      parseSignAndSendTransactionParams(params)
+    )
+  }
+
+  if (COSMOS_GET_KEY_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_cosmosGetKey',
+      { chainId: String((params as any)?.chainId || '') }
+    )
+  }
+
+  if (COSMOS_SIGN_DIRECT_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_cosmosSignDirect',
+      parseCosmosSignDirectParams(params)
+    )
+  }
+
+  if (COSMOS_SIGN_AMINO_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'sign'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_cosmosSignAmino',
+      parseCosmosSignAminoParams(params)
+    )
+  }
+
+  if (COSMOS_SEND_TX_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network) throw { code: 4900, message: 'No network is available' }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'send_coin'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_cosmosSendTx',
+      parseCosmosSendTxParams(params)
+    )
+  }
+
+  if (ETHEREUM_SEND_TRANSACTION_METHODS.has(method)) {
+    if (!(state.isInitialized ?? false) || !(state.hasVault ?? false)) {
+      throw { code: -32603, message: 'Wallet is not initialized' }
+    }
+    if (!network || network.coinType !== 'EVM') {
+      throw { code: 4900, message: 'No EVM network is available' }
+    }
+    const activeAccount = state.accounts?.find((a) => a.id === state.activeAccountId) || state.accounts?.[0]
+    if (!activeAccount) throw { code: -32603, message: 'No account available' }
+    if (origin) {
+      const approved = await requestScopes(origin, ['read', 'send_coin'], { networkId: effectiveNetworkId })
+      if (!approved) throw { code: 4001, message: 'User rejected the request' }
+      await touchLastConnected(origin)
+    }
+    return await requestDappActionApproval(
+      origin || 'unknown',
+      network.id,
+      activeAccount.id,
+      'wallet_signAndSendTransaction',
+      { ecosystem: 'evm', ...parseEvmTransactionRequest(params) }
+    )
   }
 
   if (SEND_TRANSACTION_METHODS.has(method)) {
@@ -1505,12 +2250,45 @@ chrome.runtime.onMessage.addListener((message: DappRequest | MonitorRequest, sen
     return true
   }
 
+  if (message?.type === 'METAYOSHI_MONITOR_GET_BRIDGE_TRACE') {
+    void getBridgeTraceLog()
+      .then((entries) => sendResponse({ ok: true, entries }))
+      .catch((err) => {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      })
+    return true
+  }
+
+  if (message?.type === 'METAYOSHI_MONITOR_CLEAR_BRIDGE_TRACE') {
+    void clearBridgeTraceLog()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+      })
+    return true
+  }
+
   if (message.type === 'DAPP_INTERNAL_RPC') {
     const { request, origin } = message
     const originUrl = origin || sender?.origin || sender?.url || 'unknown'
+
+    void recordBridgeTrace('background-sw', 'rpc-received', {
+      method: request?.method,
+      origin: originUrl,
+      requestId: request?.id ?? null,
+      params: summarizeTraceValue(request?.params),
+      senderOrigin: sender?.origin || null,
+      senderUrl: sender?.url || null
+    })
     
     handleRpcMethod(request.method, request.params, originUrl)
       .then((result) => {
+        void recordBridgeTrace('background-sw', 'rpc-result', {
+          method: request?.method,
+          origin: originUrl,
+          requestId: request?.id ?? null,
+          result: summarizeTraceValue(result)
+        })
         const response: JsonRpcResponse = {
           jsonrpc: '2.0',
           id: request.id ?? null,
@@ -1523,6 +2301,14 @@ chrome.runtime.onMessage.addListener((message: DappRequest | MonitorRequest, sen
           kind: 'dapp-rpc',
           method: request.method,
           origin: originUrl
+        })
+        void recordBridgeTrace('background-sw', 'rpc-error', {
+          method: request?.method,
+          origin: originUrl,
+          requestId: request?.id ?? null,
+          code: err?.code ?? null,
+          message: err?.message ?? String(err ?? 'Unknown error'),
+          data: summarizeTraceValue(err?.data)
         })
         const response: JsonRpcResponse = {
           jsonrpc: '2.0',

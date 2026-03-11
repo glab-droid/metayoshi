@@ -22,8 +22,10 @@ import Disconnected from './pages/wallet/Disconnected'
 import EvmModelPage from './pages/wallet/models/EvmModelPage'
 import CardanoModelPage from './pages/wallet/models/CardanoModelPage'
 import CosmosModelPage from './pages/wallet/models/CosmosModelPage'
+import MoneroModelPage from './pages/wallet/models/MoneroModelPage'
 import UtxoAssetsModelPage from './pages/wallet/models/UtxoAssetsModelPage'
 import UtxoClassicModelPage from './pages/wallet/models/UtxoClassicModelPage'
+import XrpModelPage from './pages/wallet/models/XrpModelPage'
 import GenericModelPage from './pages/wallet/models/GenericModelPage'
 import DappConnectStep1 from './pages/dapp/DappConnectStep1'
 import DappConnectStep2 from './pages/dapp/DappConnectStep2'
@@ -41,6 +43,7 @@ import RestoreSettings from './pages/settings/RestoreSettings'
 import ShowSecrets from './pages/settings/ShowSecrets'
 import AccountManager from './pages/settings/AccountManager'
 import AuthorizedSites from './pages/settings/AuthorizedSites'
+import LocalRpcSettings from './pages/settings/LocalRpcSettings'
 import BridgeTxAuthSettings from './pages/settings/BridgeTxAuthSettings'
 import BlockchainVisibilitySettings from './pages/settings/BlockchainVisibilitySettings'
 import TermsAndRules from './pages/TermsAndRules'
@@ -100,10 +103,13 @@ const WalletShellGate = () => {
 }
 
 const TxRouteGate = ({ element }: { element: ReactElement }) => {
+  const location = useLocation()
   const { isLocked, networks, activeNetworkId, disabledNetworkIds } = useWalletStore()
+  const isDappTxRoute = new URLSearchParams(location.search).get('dappRequest') === '1'
   const enabledNetworks = getEnabledNetworks(networks, disabledNetworkIds)
   const activeNetwork = enabledNetworks.find((n) => n.id === activeNetworkId) || enabledNetworks[0]
   const caps = resolveNetworkCapabilities(activeNetwork)
+  if (isDappTxRoute) return element
   if (isLocked) return <Navigate to="/unlock" replace />
   if (!caps.features.nativeSend && !caps.features.assetSend) return <Navigate to="/wallet/activity" replace />
   return element
@@ -241,9 +247,11 @@ function App() {
             <Route path="model" element={<WalletModelRedirect />} />
             <Route path="model/utxo-assets" element={<UtxoAssetsModelPage />} />
             <Route path="model/utxo-classic" element={<UtxoClassicModelPage />} />
+            <Route path="model/xrp" element={<XrpModelPage />} />
             <Route path="model/evm" element={<EvmModelPage />} />
             <Route path="model/cosmos" element={<CosmosModelPage />} />
             <Route path="model/cardano" element={<CardanoModelPage />} />
+            <Route path="model/monero" element={<MoneroModelPage />} />
             <Route path="model/generic" element={<GenericModelPage />} />
             <Route path="send" element={<SendRouteGate />} />
             <Route path="swap" element={<Swap />} />
@@ -279,6 +287,7 @@ function App() {
             <Route path="donation" element={<DonationSettings />} />
             <Route path="authorized-sites" element={<AuthorizedSites />} />
             <Route path="blockchains" element={<BlockchainVisibilitySettings />} />
+            <Route path="local-rpc" element={<LocalRpcSettings />} />
             <Route path="bridge-auth" element={<BridgeTxAuthSettings />} />
             <Route path="rpc" element={<Navigate to="/settings" replace />} />
           </Route>

@@ -142,6 +142,47 @@ async function getSolanaBalanceDirectRpc(rpcUrl: string, address: string): Promi
   return String(lamports / LAMPORTS_PER_SOL)
 }
 
+async function getMoneroBalanceViaBridge(rpcConfig: UtxoRpcConfig): Promise<string> {
+  const variants: Array<{ method: string; params: any[] }> = [
+    { method: 'get_balance', params: [] },
+    { method: 'getbalance', params: [] },
+    { method: 'getBalance', params: [] }
+  ]
+  const cacheKey = resolveBridgeVariantCacheKey(rpcConfig, 'monero-balance')
+  const cached = bridgeMethodVariantCache.get(cacheKey)
+  const calls = cached && isFresh(cached.checkedAt, BRIDGE_METHOD_VARIANT_CACHE_TTL_MS)
+    ? [
+        ...variants.filter((v) => v.method === cached.method),
+        ...variants.filter((v) => v.method !== cached.method)
+      ]
+    : variants
+
+  let lastError: unknown = null
+  for (const call of calls) {
+    try {
+      const result = await callBridgeMethod(rpcConfig, call.method, call.params)
+      const unlockedAtomic = asNumberLike((result as any)?.unlocked_balance)
+      const totalAtomic = asNumberLike((result as any)?.balance)
+      if (unlockedAtomic !== null) {
+        bridgeMethodVariantCache.set(cacheKey, { method: call.method, checkedAt: Date.now() })
+        return formatDecimalUnits(BigInt(Math.trunc(unlockedAtomic)), 12)
+      }
+      if (totalAtomic !== null) {
+        bridgeMethodVariantCache.set(cacheKey, { method: call.method, checkedAt: Date.now() })
+        return formatDecimalUnits(BigInt(Math.trunc(totalAtomic)), 12)
+      }
+      const scalar = asDecimalString((result as any)?.balance ?? result)
+      if (scalar) {
+        bridgeMethodVariantCache.set(cacheKey, { method: call.method, checkedAt: Date.now() })
+        return scalar
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Bridge Monero balance query failed')
+}
+
 async function getStellarBalanceViaBridge(rpcConfig: UtxoRpcConfig, address: string): Promise<string> {
   const variants: Array<{ method: string; params: any[] }> = [
     { method: 'getaddressbalance', params: [address] },
@@ -319,6 +360,10 @@ export async function fetchProtocolBalance(network: Network, modelId: string, ad
     const rpcUrl = String(network.rpcUrl || '').trim()
     if (!rpcUrl) throw new Error('SOL RPC URL is not configured')
     return await getSolanaBalanceDirectRpc(rpcUrl, address)
+  }
+  if (modelId === 'xmr') {
+    if (!rpcConfig?.bridgeUrl) throw new Error('Bridge RPC config is required for XMR')
+    return await getMoneroBalanceViaBridge(rpcConfig)
   }
   if (modelId === 'ada') {
     if (!rpcConfig?.bridgeUrl) throw new Error('Bridge RPC config is required for ADA')

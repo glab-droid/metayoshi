@@ -7,6 +7,18 @@ export const DAPP_BLOCKED_INTERNAL_ORIGIN_MESSAGE = 'Blocked internal applicatio
 export type DappScope = 'read' | 'sign' | 'send_coin' | 'send_asset' | 'select_account' | 'switch_network'
 export type DappApprovalStatus = 'pending' | 'approved' | 'rejected'
 export type DappRequestStatus = 'pending' | 'approved' | 'rejected' | 'executed' | 'failed'
+export type DappRequestMethod =
+  | 'wallet_sendTransaction'
+  | 'wallet_sendAsset'
+  | 'wallet_signMessage'
+  | 'wallet_signTypedData'
+  | 'wallet_signTransaction'
+  | 'wallet_signAllTransactions'
+  | 'wallet_signAndSendTransaction'
+  | 'wallet_cosmosGetKey'
+  | 'wallet_cosmosSignDirect'
+  | 'wallet_cosmosSignAmino'
+  | 'wallet_cosmosSendTx'
 
 export interface DappPermission {
   origin: string
@@ -58,25 +70,34 @@ export interface DappRequestError {
   message: string
 }
 
-export interface DappRequestResult {
-  hash: string
-  txid: string
-}
-
 export interface DappPendingRequest {
   id: string
   origin: string
-  method: 'wallet_sendTransaction' | 'wallet_sendAsset'
+  method: DappRequestMethod
   networkId: string
   accountId: string
-  request: DappSendRequestPayload | DappSendAssetRequestPayload
+  request: unknown
   status: DappRequestStatus
   requestedAt: number
   updatedAt: number
   expiresAt: number
-  result?: DappRequestResult
+  result?: unknown
   error?: DappRequestError
 }
+
+export const DAPP_REQUEST_METHODS: DappRequestMethod[] = [
+  'wallet_sendTransaction',
+  'wallet_sendAsset',
+  'wallet_signMessage',
+  'wallet_signTypedData',
+  'wallet_signTransaction',
+  'wallet_signAllTransactions',
+  'wallet_signAndSendTransaction',
+  'wallet_cosmosGetKey',
+  'wallet_cosmosSignDirect',
+  'wallet_cosmosSignAmino',
+  'wallet_cosmosSendTx'
+]
 
 const VALID_SCOPES: DappScope[] = ['read', 'sign', 'send_coin', 'send_asset', 'select_account', 'switch_network']
 
@@ -296,15 +317,6 @@ function parseDappRequestError(raw: unknown): DappRequestError | undefined {
   return { code, message }
 }
 
-function parseDappRequestResult(raw: unknown): DappRequestResult | undefined {
-  if (!raw || typeof raw !== 'object') return undefined
-  const candidate = raw as Partial<DappRequestResult>
-  const hash = String(candidate.hash || '').trim()
-  const txid = String(candidate.txid || hash).trim()
-  if (!hash || !txid) return undefined
-  return { hash, txid }
-}
-
 export function parseDappPendingRequest(raw: unknown): DappPendingRequest | null {
   if (!raw || typeof raw !== 'object') return null
   const candidate = raw as Partial<DappPendingRequest>
@@ -314,16 +326,20 @@ export function parseDappPendingRequest(raw: unknown): DappPendingRequest | null
   const origin = normalizeDappOrigin(String(candidate.origin || ''))
   if (!origin || origin === 'unknown') return null
   const method = String(candidate.method || '').trim()
-  if (method !== 'wallet_sendTransaction' && method !== 'wallet_sendAsset') return null
+  if (!DAPP_REQUEST_METHODS.includes(method as DappRequestMethod)) return null
 
   const networkId = String(candidate.networkId || '').trim()
   const accountId = String(candidate.accountId || '').trim()
   if (!networkId || !accountId) return null
 
-  const request = method === 'wallet_sendAsset'
-    ? parseDappSendAssetRequest(candidate.request)
-    : parseDappSendRequest(candidate.request)
-  if (!request) return null
+  let request: unknown = candidate.request
+  if (method === 'wallet_sendAsset') {
+    request = parseDappSendAssetRequest(candidate.request)
+    if (!request) return null
+  } else if (method === 'wallet_sendTransaction') {
+    request = parseDappSendRequest(candidate.request)
+    if (!request) return null
+  }
 
   const now = Date.now()
   const requestedAt = typeof candidate.requestedAt === 'number' ? candidate.requestedAt : now
@@ -333,7 +349,7 @@ export function parseDappPendingRequest(raw: unknown): DappPendingRequest | null
   return {
     id,
     origin,
-    method: method as 'wallet_sendTransaction' | 'wallet_sendAsset',
+    method: method as DappRequestMethod,
     networkId,
     accountId,
     request,
@@ -341,7 +357,7 @@ export function parseDappPendingRequest(raw: unknown): DappPendingRequest | null
     requestedAt,
     updatedAt,
     expiresAt,
-    result: parseDappRequestResult(candidate.result),
+    result: candidate.result,
     error: parseDappRequestError(candidate.error)
   }
 }

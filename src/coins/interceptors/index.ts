@@ -53,39 +53,42 @@ function normalizeRegistryNetworkId(networkId?: string): string {
 }
 
 function resolveDefaultBridgePath(coinId: string, chain: 'main' | 'test'): string {
-  if (coinId === 'raptoreum') return `/v1/bridge/${coinId}/${chain}/wallet/mainwallet`
+  if (coinId === 'raptoreum' || coinId === 'xrp') return `/v1/bridge/${coinId}/${chain}/wallet/mainwallet`
   return `/v1/bridge/${coinId}/${chain}`
 }
 
 function resolveStandardProtocol(networkId: string, coinId: string): CoinApiInfo['protocol'] {
-  if (
-    networkId === 'cosmos'
-    || coinId === 'cosmos'
-  ) return 'cosmos-rest-bridge'
-  if (
-    networkId === 'eth'
-    || networkId === 'arb'
-    || networkId === 'op'
-    || networkId === 'base'
-    || networkId === 'bnb'
-    || networkId === 'polygon'
-    || networkId === 'avaxc'
-    || networkId === 'cronos'
-    || coinId === 'ethereum'
-    || coinId === 'arbitrum-one'
-    || coinId === 'optimism'
-    || coinId === 'base'
-    || coinId === 'bsc'
-    || coinId === 'bsc-testnet'
-    || coinId === 'polygon-bor'
-    || coinId === 'avalanche-c-chain'
-    || coinId === 'cronos'
-  ) return 'evm-jsonrpc'
-  return 'utxo-jsonrpc'
+  const meta = STANDARD_RUNTIME_META[networkId]
+  switch (meta?.protocolFamily) {
+    case 'cosmos':
+      return 'cosmos-rest-bridge'
+    case 'evm':
+      return 'evm-jsonrpc'
+    case 'solana':
+      return 'solana-jsonrpc'
+    case 'tron':
+      return 'tron-http'
+    case 'cardano':
+      return 'cardano-bridge'
+    case 'sui':
+      return 'sui-jsonrpc'
+    case 'stellar':
+      return 'stellar-horizon'
+    case 'xrp':
+      return 'xrp-jsonrpc-compat'
+    case 'monero':
+      return 'monero-wallet-compat'
+    case 'generic':
+      return 'generic'
+    case 'utxo':
+    default:
+      if (coinId === 'cosmos' || coinId === 'cronos-pos') return 'cosmos-rest-bridge'
+      return 'utxo-jsonrpc'
+  }
 }
 
 function usesWalletScopedSendRoutes(coinId: string): boolean {
-  return coinId === 'raptoreum'
+  return coinId === 'raptoreum' || coinId === 'xrp'
 }
 
 function createStandardApiInfo(networkId: string): CoinApiInfo | undefined {
@@ -104,7 +107,7 @@ function createStandardApiInfo(networkId: string): CoinApiInfo | undefined {
     apiBaseUrl,
     defaultRpcUrl: apiBaseUrl,
     defaultBridgeUrl: `${apiBaseUrl}${bridgePath}`,
-    defaultWallet: meta.coinId === 'raptoreum' ? 'mainwallet' : '',
+    defaultWallet: meta.coinId === 'raptoreum' || meta.coinId === 'xrp' ? 'mainwallet' : '',
     defaultExplorerUrl: '',
     healthUrl: `${apiBaseUrl}/health`,
     bridgeMethodsUrl: `${apiBaseUrl}/v1/bridge/methods/${meta.coinId}`,

@@ -26,6 +26,7 @@ const SERVER_COIN_TO_NETWORK_ID: Record<string, string> = {
   babylon: 'cosmos',
   bitcanna: 'cosmos',
   dogecoin: 'doge',
+  dash: 'dash',
   bitcoin: 'srv--bitcoin',
   bitcoinz: 'btcz',
   celestia: 'cosmos',
@@ -47,8 +48,12 @@ const SERVER_COIN_TO_NETWORK_ID: Record<string, string> = {
   stride: 'cosmos',
   terra: 'cosmos',
   'terra-classic': 'cosmos',
+  tidecoin: 'tide',
   firo: 'firo',
+  xrp: 'xrp',
+  arr: 'arr',
   cardano: 'ada',
+  monero: 'xmr',
   stellar: 'xlm',
   xlm: 'xlm',
   ethereum: 'eth',
@@ -74,6 +79,7 @@ const SERVER_COIN_TO_NETWORK_ID: Record<string, string> = {
   mantle: 'eth',
   moonbeam: 'eth',
   moonriver: 'eth',
+  'cronos-pos': 'cro',
   avail: 'eth',
   peaq: 'eth',
   'syscoin-tanenbaum-evm': 'eth',
@@ -190,8 +196,7 @@ const SERVER_COIN_VARIANT_SUFFIXES = [
 ]
 
 export const EVM_MODEL_NETWORK_IDS = new Set(['eth', 'arb', 'op', 'base', 'bnb', 'polygon', 'avaxc', 'cronos', 'zksync'])
-// This restart keeps one Cosmos wallet model and maps server-side variants into it.
-export const COSMOS_MODEL_NETWORK_IDS = new Set(['cosmos'])
+export const COSMOS_MODEL_NETWORK_IDS = new Set(['cosmos', 'cro'])
 
 export function isBlockedServerCoinId(coinId: string): boolean {
   const normalized = String(coinId || '').trim().toLowerCase()
@@ -231,6 +236,7 @@ export function mapServerCoinIdToNetworkId(coinId: string): string | null {
   if (normalized === 'blast' || normalized.startsWith('blast-')) return 'eth'
   if (normalized === 'berachain' || normalized.startsWith('berachain-')) return 'eth'
   if (normalized === 'celo' || normalized.startsWith('celo-')) return 'eth'
+  if (normalized === 'cronos-pos' || normalized.startsWith('cronos-pos')) return 'cro'
   if (normalized === 'cronos' || normalized === 'cronos-evm' || normalized.startsWith('cronos-evm')) return 'cronos'
   if (normalized === 'zksync' || normalized === 'zksync-era' || normalized.startsWith('zksync-era-')) return 'zksync'
   if (normalized === 'fraxtal' || normalized.startsWith('fraxtal-')) return 'eth'
@@ -336,9 +342,9 @@ export function resolveAppNetworkId(baseNetworkId: string, serverCoinId: string)
     return `${normalizedBaseNetworkId}--${sanitizeServerCoinId(normalizedServerCoinId)}`
   }
   if (COSMOS_MODEL_NETWORK_IDS.has(normalizedBaseNetworkId)) {
-    // Persist the base Cosmos id when the server coin matches the canonical mainnet.
     const canonicalServerIdByModel: Record<string, string> = {
-      cosmos: 'cosmos'
+      cosmos: 'cosmos',
+      cro: 'cronos-pos'
     }
     if (normalizedServerCoinId === canonicalServerIdByModel[normalizedBaseNetworkId]) {
       return normalizedBaseNetworkId

@@ -14,6 +14,13 @@ export const DOGE_ADDRESS_SPEC: UtxoAddressSpec = {
   p2pkhVersion: 0x1e
 }
 
+// Conservative DOGE baseline so send previews and spendability checks stay stable.
+export const DOGE_FEE_PER_BYTE = 0.00001
+
+export function estimateDogeFee(txBytes: number): number {
+  return txBytes * DOGE_FEE_PER_BYTE
+}
+
 export function createDogeNetwork(ctx: CoinRuntimeContext): Network {
   const env = (import.meta as any)?.env || {}
   const { bridgeUsername, bridgePassword } = resolveBridgeCredentials({
@@ -39,6 +46,7 @@ export function createDogeNetwork(ctx: CoinRuntimeContext): Network {
     bridgePassword,
     explorerUrl: String(import.meta.env.VITE_DOGE_EXPLORER || 'https://dogechain.info').trim(),
     capabilities: DOGE_CAPABILITIES,
+    feePerByte: DOGE_FEE_PER_BYTE,
     logo: getUnifiedLogoByName('dogecoin')
   }
 }
@@ -49,5 +57,6 @@ export const dogeCoin: CoinModule = {
   coinSymbol: 'DOGE',
   capabilities: DOGE_CAPABILITIES,
   utxoAddress: DOGE_ADDRESS_SPEC,
-  createNetwork: createDogeNetwork
+  createNetwork: createDogeNetwork,
+  estimateFee: estimateDogeFee
 }

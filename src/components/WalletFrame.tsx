@@ -90,6 +90,7 @@ export const WalletFrame: React.FC<WalletFrameProps> = ({ children, hideHeader =
     || ''
   const activeModelId = resolveRuntimeModelId(activeNetwork)
   const supportsReceiveMemo = isCosmosLikeModelId(activeModelId)
+  const receiveMemoScheme = activeModelId === 'cro' || activeModelId === 'crocosmos' ? 'cro' : 'cosmos'
   const receiveMemoSymbol = activeNetwork?.symbol || 'ATOM'
   const receiveLayer1 = React.useMemo(() => {
     if (!EVM_ETHEREUM_L2_COIN_IDS.has(activeModelId)) return null
@@ -103,8 +104,8 @@ export const WalletFrame: React.FC<WalletFrameProps> = ({ children, hideHeader =
     if (!address) return ''
     const memo = String(receiveMemo || '').trim()
     if (!supportsReceiveMemo || !memo) return address
-    return `cosmos:${address}?memo=${encodeURIComponent(memo)}`
-  }, [rawAddress, receiveMemo, supportsReceiveMemo])
+    return `${receiveMemoScheme}:${address}?memo=${encodeURIComponent(memo)}`
+  }, [rawAddress, receiveMemo, receiveMemoScheme, supportsReceiveMemo])
   const shortenedAddress = rawAddress
     ? `${rawAddress.slice(0, 4)}…${rawAddress.slice(-6)}`
     : ''
@@ -392,7 +393,11 @@ export const WalletFrame: React.FC<WalletFrameProps> = ({ children, hideHeader =
                     className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
                       activeNetworkId === n.id ? 'border-primary bg-primary/5' : 'border-dark-600 bg-dark-700/50 hover:bg-dark-700'
                     }`}
-                    onClick={() => { void setActiveNetwork(n.id); setShowNetworkMenu(false); setNetworkSearch('') }}
+                    onClick={() => {
+                      void setActiveNetwork(n.id)
+                      setShowNetworkMenu(false)
+                      setNetworkSearch('')
+                    }}
                   >
                     <div className="flex items-center gap-3">
                       {n.logo

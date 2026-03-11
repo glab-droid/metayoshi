@@ -17,7 +17,8 @@ export interface EvmExternalSignTxInput {
 export interface EvmExternalSigner {
   mode: Exclude<EvmExternalSignerMode, 'local'>
   getAddress: () => Promise<string>
-  signMessage: (message: string) => Promise<string>
+  signMessage: (message: string | Uint8Array) => Promise<string>
+  signTypedData: (domain: Record<string, any>, types: Record<string, any>, value: Record<string, any>) => Promise<string>
   sendTransaction: (input: EvmExternalSignTxInput) => Promise<{ hash: string }>
 }
 
@@ -104,7 +105,15 @@ function createInjectedHardwareSigner(): EvmExternalSigner {
     },
     signMessage: async (message) => {
       await injected.request?.({ method: 'eth_requestAccounts' })
-      return await withBrowserSigner(injected, async ({ signer }) => await signer.signMessage(String(message || '')), expectedAddress)
+      return await withBrowserSigner(injected, async ({ signer }) => await signer.signMessage(message as any), expectedAddress)
+    },
+    signTypedData: async (domain, types, value) => {
+      await injected.request?.({ method: 'eth_requestAccounts' })
+      return await withBrowserSigner(
+        injected,
+        async ({ signer }) => await (signer as any).signTypedData(domain, types, value),
+        expectedAddress
+      )
     },
     sendTransaction: async (input) => {
       await injected.request?.({ method: 'eth_requestAccounts' })
@@ -163,7 +172,17 @@ function createWalletConnectSigner(): EvmExternalSigner {
       const wc = await getWalletConnectProvider()
       await wc.connect?.()
       await wc.request?.({ method: 'eth_requestAccounts', params: [] })
-      return await withBrowserSigner(wc, async ({ signer }) => await signer.signMessage(String(message || '')), expectedAddress)
+      return await withBrowserSigner(wc, async ({ signer }) => await signer.signMessage(message as any), expectedAddress)
+    },
+    signTypedData: async (domain, types, value) => {
+      const wc = await getWalletConnectProvider()
+      await wc.connect?.()
+      await wc.request?.({ method: 'eth_requestAccounts', params: [] })
+      return await withBrowserSigner(
+        wc,
+        async ({ signer }) => await (signer as any).signTypedData(domain, types, value),
+        expectedAddress
+      )
     },
     sendTransaction: async (input) => {
       const wc = await getWalletConnectProvider()

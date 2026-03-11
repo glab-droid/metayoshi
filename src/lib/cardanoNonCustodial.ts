@@ -4,7 +4,6 @@ import type { Network } from '../coins'
 type CardanoLib = typeof import('@emurgo/cardano-serialization-lib-browser')
 
 let cardanoLibPromise: Promise<CardanoLib> | null = null
-const DEFAULT_API_BASE_URL = 'https://api.metayoshi.app'
 
 function loadCardanoLib(): Promise<CardanoLib> {
   if (!cardanoLibPromise) {
@@ -46,7 +45,7 @@ function resolveCardanoNetworkId(rpcUrl?: string): number {
 }
 
 function resolveApiBaseUrl(network: Network): string {
-  const explicit = String(import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).trim().replace(/\/+$/, '')
+  const explicit = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
   if (explicit) return explicit
   const bridge = String(network.bridgeUrl || '').trim()
   if (bridge) {
@@ -57,7 +56,7 @@ function resolveApiBaseUrl(network: Network): string {
       // fall through
     }
   }
-  return DEFAULT_API_BASE_URL
+  throw new Error('VITE_API_BASE_URL is required for Cardano non-custodial flow')
 }
 
 function resolveApiHeaders(): Record<string, string> {

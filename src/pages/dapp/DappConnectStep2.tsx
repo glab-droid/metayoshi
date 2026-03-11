@@ -2,7 +2,6 @@ import React, { useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { IoArrowBack, IoCheckmarkCircle } from 'react-icons/io5'
 import { Button } from '../../components/Button'
-import { PasswordGate } from '../../components/PasswordGate'
 import {
   DAPP_PENDING_APPROVAL_STORAGE_KEY,
   type DappScope
@@ -23,7 +22,7 @@ function scopeLabel(scope: DappScope): string {
 
 const DappConnectStep2: React.FC = () => {
   const navigate = useNavigate()
-  const { addAuthorizedSite, accounts, activeAccountId, activeNetworkId, isLocked, networks } = useWalletStore()
+  const { addAuthorizedSite, accounts, activeAccountId, activeNetworkId, networks } = useWalletStore()
   const { pendingApproval, loadingApproval } = usePendingDappApproval()
 
   const activeAccount = useMemo(
@@ -46,6 +45,7 @@ const DappConnectStep2: React.FC = () => {
     if (networkAddress) return networkAddress
 
     if (approvalNetwork?.coinType === 'EVM') return String(activeAccount.addresses?.EVM || '').trim()
+    if (approvalNetwork?.coinType === 'XRP') return String(activeAccount.addresses?.XRP || '').trim()
     if (approvalNetwork?.coinType === 'COSMOS') return String(activeAccount.addresses?.COSMOS || '').trim()
     if (approvalNetwork?.coinType === 'UTXO') return String(activeAccount.addresses?.UTXO || '').trim()
 
@@ -142,17 +142,6 @@ const DappConnectStep2: React.FC = () => {
       </footer>
     </div>
   )
-
-  if (isLocked) {
-    return (
-      <PasswordGate
-        title="Unlock to approve dApp"
-        description="Enter your wallet password to confirm this website authorization."
-      >
-        {content}
-      </PasswordGate>
-    )
-  }
 
   return content
 }

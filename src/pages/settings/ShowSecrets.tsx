@@ -16,7 +16,7 @@ import { deriveCosmosAddress, resolveCosmosAddressConfig } from '../../lib/cosmo
 import { deriveSuiAddress } from '../../lib/suiAddress'
 import { deriveUtxoAddress } from '../../lib/utxoAddress'
 import { getAccountDisplayName } from '../../lib/accountName'
-import { isCosmosLikeModelId, resolveRuntimeModelId } from '../../lib/runtimeModel'
+import { resolveRuntimeModelId } from '../../lib/runtimeModel'
 
 const ShowSecrets: React.FC = () => {
   const { sessionMnemonic, accounts, activeAccountId, networks, activeNetworkId } = useWalletStore()
@@ -62,7 +62,7 @@ const ShowSecrets: React.FC = () => {
           return
         }
 
-        if (isCosmosLikeModelId(modelId)) {
+        if (modelId === 'cosmos' || modelId === 'cro' || modelId === 'crocosmos') {
           const cosmosCfg = resolveCosmosAddressConfig({
             runtimeModelId: activeNetwork.runtimeModelId,
             serverCoinId: activeNetwork.serverCoinId,

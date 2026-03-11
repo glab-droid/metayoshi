@@ -1,91 +1,12 @@
-import { ethers } from 'ethers'
 import type { CoinType, Network } from '../coins'
-import { deriveCosmosAddress } from '../lib/cosmosAddress'
-import { deriveSuiAddress } from '../lib/suiAddress'
-import { resolveRuntimeModelId as resolveNetworkModelId } from '../lib/runtimeModel'
-import { deriveUtxoAddress } from '../lib/utxoAddress'
-import { isCroCosmosModel, resolveCosmosNetworkConfig } from './walletStoreStateUtils'
-
-let cardanoAddressModulePromise: Promise<typeof import('../lib/cardanoAddress')> | null = null
-let solanaAddressModulePromise: Promise<typeof import('../lib/solanaAddress')> | null = null
-let stellarAddressModulePromise: Promise<typeof import('../lib/stellarAddress')> | null = null
-let tronAddressModulePromise: Promise<typeof import('../lib/tronAddress')> | null = null
-
-function loadCardanoAddressModule() {
-  if (!cardanoAddressModulePromise) cardanoAddressModulePromise = import('../lib/cardanoAddress')
-  return cardanoAddressModulePromise
-}
-
-function loadSolanaAddressModule() {
-  if (!solanaAddressModulePromise) solanaAddressModulePromise = import('../lib/solanaAddress')
-  return solanaAddressModulePromise
-}
-
-function loadStellarAddressModule() {
-  if (!stellarAddressModulePromise) stellarAddressModulePromise = import('../lib/stellarAddress')
-  return stellarAddressModulePromise
-}
-
-function loadTronAddressModule() {
-  if (!tronAddressModulePromise) tronAddressModulePromise = import('../lib/tronAddress')
-  return tronAddressModulePromise
-}
-
-function evmDerivationPath(accountIndex: number): string {
-  return `m/44'/60'/${accountIndex}'/0/0`
-}
-
-function deriveEvmAddress(mnemonic: string, derivationIndex: number): string {
-  return ethers.HDNodeWallet.fromPhrase(mnemonic, undefined, evmDerivationPath(derivationIndex)).address
-}
+import { deriveAddressForNetwork, resolveNetworkProtocolFamily } from '../lib/protocolRegistry'
 
 export async function deriveSingleNetworkAddress(
   mnemonic: string,
   network: Network,
   derivationIndex: number
 ): Promise<string> {
-  const modelId = resolveNetworkModelId(network)
-
-  // Address derivation stays per-runtime so adding or removing chains does not
-  // leak assumptions into unrelated families.
-  if (network.coinType === 'EVM') {
-    return deriveEvmAddress(mnemonic, derivationIndex)
-  }
-  if (modelId === 'cosmos' || isCroCosmosModel(network)) {
-    const cosmosCfg = resolveCosmosNetworkConfig(network)
-    const derived = await deriveCosmosAddress(mnemonic, derivationIndex, cosmosCfg)
-    return derived.address
-  }
-  if (network.coinType === 'UTXO' && network.coinSymbol) {
-    const derived = await deriveUtxoAddress(mnemonic, network.coinSymbol, derivationIndex, 0, 0)
-    return derived.address
-  }
-  if (modelId === 'ada') {
-    const { deriveCardanoAddress } = await loadCardanoAddressModule()
-    const derived = await deriveCardanoAddress(mnemonic, derivationIndex, network.rpcUrl)
-    return derived.address
-  }
-  if (modelId === 'sol') {
-    const { deriveSolanaAddress } = await loadSolanaAddressModule()
-    const derived = await deriveSolanaAddress(mnemonic, derivationIndex)
-    return derived.address
-  }
-  if (modelId === 'sui') {
-    const derived = await deriveSuiAddress(mnemonic, derivationIndex)
-    return derived.address
-  }
-  if (modelId === 'xlm') {
-    const { deriveStellarAddress } = await loadStellarAddressModule()
-    const derived = await deriveStellarAddress(mnemonic, derivationIndex)
-    return derived.address
-  }
-  if (modelId === 'tron') {
-    const { deriveTronAddress } = await loadTronAddressModule()
-    const derived = await deriveTronAddress(mnemonic, derivationIndex)
-    return derived.address
-  }
-
-  return ''
+  return deriveAddressForNetwork(mnemonic, network, derivationIndex)
 }
 
 export async function deriveAccountAddresses(
@@ -100,6 +21,7 @@ export async function deriveAccountAddresses(
   const networkAddresses: Record<string, string> = {}
   const derivationErrors: string[] = []
   let firstUtxoAddress = ''
+  let firstXrpAddress = ''
   let firstCosmosAddress = ''
   let evmAddress = ''
 
@@ -116,7 +38,8 @@ export async function deriveAccountAddresses(
       networkAddresses[net.id] = address
       if (net.coinType === 'EVM' && !evmAddress) evmAddress = address
       if (net.coinType === 'UTXO' && !firstUtxoAddress) firstUtxoAddress = address
-      if ((resolveNetworkModelId(net) === 'cosmos' || isCroCosmosModel(net)) && !firstCosmosAddress) {
+      if (net.coinType === 'XRP' && !firstXrpAddress) firstXrpAddress = address
+      if (resolveNetworkProtocolFamily(net) === 'cosmos' && !firstCosmosAddress) {
         firstCosmosAddress = address
       }
     } catch (err) {
@@ -133,7 +56,8 @@ export async function deriveAccountAddresses(
       BTC: '',
       COSMOS: firstCosmosAddress,
       SOL: '',
-      SUI: ''
+      SUI: '',
+      XRP: firstXrpAddress
     },
     networkAddresses,
     derivationErrors

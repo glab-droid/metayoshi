@@ -34,8 +34,11 @@ export interface UtxoRpcConfig {
   timeoutMs?: number      // request timeout (default 10000ms)
   apiInterceptor?: CoinApiInterceptor
 
-  /** Internal-only bridge bypass for controlled direct RPC fallbacks. */
-  useDirectRpc?: boolean
+  /**
+   * When true, all JSON-RPC calls bypass the MetaYoshi bridge and go directly
+   * to the local UTXO node at rpcUrl. Requires a fully synced local node.
+   */
+  useLocalRpc?: boolean
 }
 
 type SecureBridgeSession = {
@@ -44,7 +47,7 @@ type SecureBridgeSession = {
   expiresAtMs: number
 }
 
-/** Build the effective direct-RPC endpoint URL. */
+/** Build the effective direct-RPC endpoint URL (local mode). */
 export function buildRpcUrl(config: UtxoRpcConfig): string {
   const base = config.rpcUrl.trim().replace(/\/$/, '')
   return config.rpcWallet ? `${base}/wallet/${config.rpcWallet}` : base
@@ -57,10 +60,10 @@ function resolveConnection(config: UtxoRpcConfig): {
   password: string | undefined
   isBridge: boolean
 } {
-  // Internal direct-RPC mode: bypass the bridge and call the configured RPC endpoint.
-  if (config.useDirectRpc) {
+  // Local node mode: call the UTXO daemon directly, bypassing the bridge.
+  if (config.useLocalRpc) {
     const url = buildRpcUrl(config)
-    if (!url) throw new Error('Direct RPC URL is not configured for this network.')
+    if (!url) throw new Error('Local RPC URL is not configured for this network.')
     return {
       url,
       username: config.rpcUsername,
@@ -71,7 +74,10 @@ function resolveConnection(config: UtxoRpcConfig): {
 
   // Default: MetaYoshi bridge
   if (!config.bridgeUrl) {
-    throw new Error('Bridge URL is not configured for this network.')
+    throw new Error(
+      'Bridge URL is not configured for this network. ' +
+      'Enable Local RPC mode in Settings → Local Node RPC.'
+    )
   }
   assertBridgeCredentialsConfigured({
     bridgeUrl: config.bridgeUrl,
@@ -766,7 +772,7 @@ async function jsonRpcCall(
     isBridge
     && isSecureBridgeWritesEnabled(config)
     && isSecureBridgeWriteMethod(method)
-    && !config.useDirectRpc
+    && !config.useLocalRpc
   ) {
     try {
       const secureResult = await executeSecureBridgeWriteRpc(config, request.url, method, params)
@@ -1028,7 +1034,7 @@ function createEvmDirectRpcConfig(config: UtxoRpcConfig): UtxoRpcConfig {
     bridgeUrl: undefined,
     bridgeUsername: undefined,
     bridgePassword: undefined,
-    useDirectRpc: true
+    useLocalRpc: true
   }
 }
 
@@ -1120,7 +1126,7 @@ function isBitcoinTestnetConfig(config: UtxoRpcConfig): boolean {
 }
 
 function isBitcoinConfig(config: UtxoRpcConfig): boolean {
-  if (config.useDirectRpc) return false
+  if (config.useLocalRpc) return false
 
   const networkId = String(config.networkId || '').trim().toLowerCase()
   if (
@@ -1141,7 +1147,7 @@ function isBitcoinConfig(config: UtxoRpcConfig): boolean {
 }
 
 function isDogecoinConfig(config: UtxoRpcConfig): boolean {
-  if (config.useDirectRpc) return false
+  if (config.useLocalRpc) return false
 
   const networkId = String(config.networkId || '').trim().toLowerCase()
   if (networkId === 'doge' || networkId === 'dogecoin') return true
@@ -2117,7 +2123,7 @@ export async function sendRtmAssetNonCustodial(
   if (qtyRawSats <= 0) throw new Error('Asset quantity must be greater than zero')
 
   let allAssetUtxos = await listUnspentAssets(config, fromAddress).catch(() => [])
-  if (allAssetUtxos.length === 0 && !config.useDirectRpc) {
+  if (allAssetUtxos.length === 0 && !config.useLocalRpc) {
     const byAddressApi = await fetchBridgeAddressAssetUtxos(config, fromAddress).catch(() => [])
     if (byAddressApi.length > 0) allAssetUtxos = byAddressApi
   }
@@ -2421,8 +2427,9 @@ export async function listUnspentAssets(
  *   the `sendasset` node RPC method needs the private key in the node wallet, which
  *   is not available for HD-derived client-side addresses.
  *
- * Strategy (direct RPC fallback):
- *   Falls back to the raw `sendasset` RPC call against the configured RPC endpoint.
+ * Strategy (local RPC mode):
+ *   Falls back to the raw `sendasset` RPC call (requires the address to be imported
+ *   into the local node wallet and the node to hold the private key).
  */
 export async function sendRtmAsset(
   config: UtxoRpcConfig,
@@ -2505,8 +2512,8 @@ export async function sendRtmAsset(
     normalizedAssetId
   ]))
 
-  // Direct RPC fallback mode
-  if (assetConfig.useDirectRpc) {
+  // Local mode: direct RPC (requires node wallet to hold the key)
+  if (assetConfig.useLocalRpc) {
     let localLastErr = ''
     for (let i = 0; i < sendAssetCandidates.length; i += 1) {
       const candidateAssetId = sendAssetCandidates[i]
@@ -3042,6 +3049,7 @@ export type BridgeTokenBalanceRow = {
   symbol?: string
   name?: string
   issuer?: string
+  logoUri?: string
   decimals?: number | null
   balanceRaw?: string
   balance?: string
@@ -3130,7 +3138,20 @@ export async function fetchBridgeTokenBalances(
       issuer: String(row?.issuer || '').trim() || undefined,
       decimals: Number.isFinite(Number(row?.decimals)) ? Number(row.decimals) : null,
       balanceRaw: String(row?.balanceRaw ?? '').trim() || undefined,
-      balance: String(row?.balance ?? '').trim() || undefined
+      balance: String(row?.balance ?? '').trim() || undefined,
+      logoUri: String(
+        row?.logoURI
+        || row?.logoUri
+        || row?.logo_uri
+        || row?.logoUrl
+        || row?.logo_url
+        || row?.logo64
+        || row?.image
+        || row?.image_url
+        || row?.imageUrl
+        || row?.preview_url
+        || ''
+      ).trim() || undefined
     }))
     .filter((row: BridgeTokenBalanceRow) => Boolean(row.tokenId))
 }

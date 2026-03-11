@@ -48,7 +48,7 @@ const WALLET_LOGO_SPECS: WalletLogoSpec[] = [
   { coinIds: ['arb'], file: 'arbitrum.png', names: ['arbitrum', 'arb', 'arbitrum-one'] },
   { coinIds: ['op'], file: 'op.png', names: ['op', 'optimism'] },
   { coinIds: ['base'], file: 'base.png', names: ['base', 'base-mainnet', 'base-chain'] },
-  { coinIds: ['bnb'], file: 'bnb.png', names: ['bnb', 'bsc', 'bnb-smart-chain', 'binance-smart-chain'] },
+  { coinIds: ['bnb', 'bnb-testnet'], file: 'bnb.png', names: ['bnb', 'bsc', 'bnb-smart-chain', 'binance-smart-chain'] },
   { coinIds: ['avaxc'], file: 'avalanche.png', names: ['avalanche', 'avax', 'avaxc', 'avalanche-c-chain'] },
   { coinIds: ['sol'], file: 'solana.png', names: ['solana', 'sol'] },
   { coinIds: ['dash'], file: 'dash.png', names: ['dash'] },
@@ -61,8 +61,7 @@ const WALLET_LOGO_SPECS: WalletLogoSpec[] = [
   { coinIds: ['cosmos'], file: 'cosmos.png', names: ['cosmos', 'atom'] },
   { coinIds: ['bitcoin'], file: 'bitcoin.png', names: ['bitcoin', 'btc'] },
   { coinIds: ['polygon'], file: 'polygon.png', names: ['polygon', 'matic'] },
-  // Keep the CRO alias so existing Cronos-native labels still resolve to the same logo.
-  { coinIds: ['cronos'], file: 'cronos.png', names: ['cronos', 'cro'] },
+  { coinIds: ['cronos', 'cro'], file: 'cronos.png', names: ['cronos', 'cro', 'cronos-pos'] },
   { coinIds: ['sui'], file: 'sui.png', names: ['sui'] },
   { coinIds: ['zksync'], file: 'ZKsync.png', names: ['zksync', 'zk-sync', 'zk sync', 'zks', 'zk', 'zk era', 'zksync-era'] }
 ]
@@ -165,28 +164,49 @@ function setProcessEnvIfMissing(key: string, value: unknown): void {
   process.env[key] = normalized
 }
 
-function loadBridgeEnvFromExplicitFile(): void {
-  // Optional local developer convenience:
-  // allow an explicit env file path without encoding any private repo layout
-  // into the public source tree. Secrets are never remapped into new VITE_*
-  // variables here.
-  const enabled = parseBooleanLike(process.env.BRIDGE_AUTOCONFIG_FROM_ENV_FILE, false)
+function loadBridgeEnvFromSiblingServerRepo(): void {
+  // Local developer convenience:
+  // Pull bridge env context from sibling metayoshi_SERVER env file.
+  // Never map shared bridge secrets into VITE_* because those values are
+  // bundled into the extension and extractable from release artifacts.
+  const enabled = parseBooleanLike(
+    process.env.BRIDGE_AUTOCONFIG_FROM_SERVER_ENV
+      ?? process.env.VITE_BRIDGE_AUTOCONFIG_FROM_SERVER_ENV,
+    false
+  )
   if (!enabled) return
 
-  const explicitPath = String(process.env.METAYOSHI_BRIDGE_ENV_FILE || '').trim()
-  if (!explicitPath) return
+  const candidateFiles = [
+    path.resolve(__dirname, '../metayoshi_SERVER/windows/local/.env.windows'),
+    path.resolve(__dirname, '../metayoshi_SERVER/windows/local/.env'),
+    path.resolve(__dirname, '../metayoshi_SERVER/windows/vultr/.env'),
+    path.resolve(__dirname, '../metayoshi_SERVER/docker/local/.env.windows'),
+    path.resolve(__dirname, '../metayoshi_SERVER/docker/local/.env'),
+    path.resolve(__dirname, '../metayoshi_SERVER/docker/vultr/.env'),
+    path.resolve(__dirname, '../metayoshi_SERVER/.env')
+  ]
 
-  const envFilePath = path.resolve(__dirname, explicitPath)
-  const sourceEnv = parseEnvFile(envFilePath)
-  if (Object.keys(sourceEnv).length === 0) return
+  let selectedFile = ''
+  let sourceEnv: Record<string, string> = {}
+  for (const file of candidateFiles) {
+    if (!existsSync(file)) continue
+    const parsed = parseEnvFile(file)
+    if (Object.keys(parsed).length === 0) continue
+    selectedFile = file
+    sourceEnv = parsed
+    break
+  }
+  if (!selectedFile) return
 
+  // Do not import BRIDGE_BASIC_USER / BRIDGE_BASIC_PASSWORD / BRIDGE_TX_AUTH_KEY
+  // into the client bundle.
   const secureApiBase = sourceEnv.SECURE_BRIDGE_API_BASE_URL || sourceEnv.API_BASE_URL
   setProcessEnvIfMissing('VITE_SECURE_BRIDGE_API_BASE_URL', secureApiBase)
 
-  console.log(`[metayoshi] Bridge env auto-config loaded from ${envFilePath} (secrets ignored)`)
+  console.log(`[metayoshi] Bridge env auto-config loaded from ${selectedFile} (secrets ignored)`)
 }
 
-loadBridgeEnvFromExplicitFile()
+loadBridgeEnvFromSiblingServerRepo()
 
 // https://vitejs.dev/config/
 export default defineConfig({

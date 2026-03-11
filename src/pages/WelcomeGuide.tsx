@@ -164,7 +164,7 @@ const WelcomeGuide: React.FC = () => {
                 ))}
               </div>
               <p className={`text-[11px] ${isLight ? 'text-slate-600' : 'text-gray-400'}`}>
-                Keep only the chains you use often. The wallet starts with tested blockchains enabled and refreshes up to {MAX_ACTIVE_REFRESH_NETWORKS} active networks at once.
+                Keep only the chains you use often. The wallet refreshes up to {MAX_ACTIVE_REFRESH_NETWORKS} active networks at once.
               </p>
             </div>
           </section>

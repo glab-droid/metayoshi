@@ -58,6 +58,7 @@ export function useAssetListModel() {
     || activeModelId === 'sol'
     || activeModelId === 'ada'
     || activeModelId === 'tron'
+    || activeNetwork?.coinType === 'XRP'
   const canOpenAssetSend = caps.features.assetSend
 
   const fiatScopeKey = `${String(activeAccountId || '').trim().toLowerCase()}::${String(activeNetworkId || '').trim().toLowerCase()}`

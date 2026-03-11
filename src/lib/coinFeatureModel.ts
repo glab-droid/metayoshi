@@ -6,6 +6,7 @@ export type EvmIntent = 'send' | 'swap' | 'approve'
 export type UtxoFeePreset = 'cheap' | 'fast' | 'premium'
 export type UtxoInputStrategy = 'minimize-inputs' | 'consolidate-fragments'
 export type UtxoTransferComposer = 'single' | 'batch'
+export type MoneroScanMode = 'fast' | 'balanced' | 'deep'
 export type ModelControlStatus = 'applied' | 'informational' | 'unsupported'
 
 export interface NetworkModelPreferences {
@@ -14,6 +15,7 @@ export interface NetworkModelPreferences {
   utxoFeePreset?: UtxoFeePreset
   utxoInputStrategy?: UtxoInputStrategy
   utxoTransferComposer?: UtxoTransferComposer
+  moneroScanMode?: MoneroScanMode
 }
 
 export interface NetworkModelControlDescriptor {
@@ -57,6 +59,12 @@ function normalizeUtxoTransferComposer(value: unknown): UtxoTransferComposer {
   return 'single'
 }
 
+function normalizeMoneroScanMode(value: unknown): MoneroScanMode {
+  const raw = String(value || '').trim().toLowerCase()
+  if (raw === 'fast' || raw === 'deep') return raw
+  return 'balanced'
+}
+
 export function resolveDefaultNetworkModelPreferences(
   network?: Pick<Network, 'id' | 'runtimeModelId' | 'coinType' | 'capabilities'>
 ): NetworkModelPreferences {
@@ -75,6 +83,10 @@ export function resolveDefaultNetworkModelPreferences(
     case 'utxo-assets':
       return {
         utxoTransferComposer: 'single'
+      }
+    case 'monero':
+      return {
+        moneroScanMode: 'balanced'
       }
     default:
       return {}
@@ -102,6 +114,9 @@ export function normalizeNetworkModelPreferences(
   }
   if (base.utxoTransferComposer !== undefined) {
     next.utxoTransferComposer = normalizeUtxoTransferComposer(source.utxoTransferComposer ?? base.utxoTransferComposer)
+  }
+  if (base.moneroScanMode !== undefined) {
+    next.moneroScanMode = normalizeMoneroScanMode(source.moneroScanMode ?? base.moneroScanMode)
   }
   return next
 }
@@ -163,6 +178,21 @@ export function resolveNetworkModelControls(network: Network): NetworkModelContr
           label: 'Transfer Composer',
           status: 'applied',
           description: 'Applied when an asset send can be routed as a consolidated multi-holder batch from Send Hub.'
+        }
+      ]
+    case 'monero':
+      return [
+        {
+          key: 'xmr-scan-mode',
+          label: 'Scan Mode',
+          status: 'informational',
+          description: 'Displayed for planning only. Monero runtime scan depth is not switchable from the popup yet.'
+        },
+        {
+          key: 'xmr-subaddress',
+          label: 'Subaddress Lane',
+          status: 'unsupported',
+          description: 'Subaddress account switching is not wired into the current signer flow.'
         }
       ]
     default:

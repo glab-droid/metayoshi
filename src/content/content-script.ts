@@ -7,6 +7,8 @@ type RuntimeErrorContext = Record<string, unknown> | undefined
 // classic script for MV3 content_scripts instead of an ESM entry with imports.
 const ERROR_STORAGE_KEY = 'metayoshi-runtime-errors-v1'
 const MAX_ERROR_LOG_ITEMS = 120
+const BRIDGE_TRACE_STORAGE_KEY = 'metayoshi-bridge-trace-v1'
+const MAX_BRIDGE_TRACE_ITEMS = 400
 
 function normalizeUnknownError(input: unknown): { message: string; stack?: string } {
   if (input instanceof Error) return { message: input.message || 'Unknown error', stack: input.stack }
@@ -26,6 +28,54 @@ function compactErrorContext(context: RuntimeErrorContext): string | undefined {
     return json.length > 1600 ? `${json.slice(0, 1600)}...` : json
   } catch {
     return undefined
+  }
+}
+
+function compactBridgeTraceContext(context?: Record<string, unknown>): string | undefined {
+  if (!context) return undefined
+  try {
+    const json = JSON.stringify(context)
+    if (!json) return undefined
+    return json.length > 2500 ? `${json.slice(0, 2500)}...` : json
+  } catch {
+    return undefined
+  }
+}
+
+function summarizeBridgeTraceValue(value: unknown, maxLength = 180): string | undefined {
+  if (value === undefined) return undefined
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    if (!text) return undefined
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  } catch {
+    const text = String(value)
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+  }
+}
+
+async function recordBridgeTrace(
+  source: string,
+  event: string,
+  context?: Record<string, unknown>
+): Promise<void> {
+  try {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return
+    const current = await chrome.storage.local.get(BRIDGE_TRACE_STORAGE_KEY)
+    const rows = Array.isArray(current?.[BRIDGE_TRACE_STORAGE_KEY]) ? current[BRIDGE_TRACE_STORAGE_KEY] : []
+    const next = [
+      {
+        id: `trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        ts: Date.now(),
+        source,
+        event,
+        context: compactBridgeTraceContext(context)
+      },
+      ...rows
+    ].slice(0, MAX_BRIDGE_TRACE_ITEMS)
+    await chrome.storage.local.set({ [BRIDGE_TRACE_STORAGE_KEY]: next })
+  } catch {
+    // Never throw from bridge tracing.
   }
 }
 
@@ -251,7 +301,20 @@ function isBlockedInternalOrigin(rawOrigin: string): boolean {
 }
 
 function forwardRequest(request: any, messageId: number): void {
+  void recordBridgeTrace('content-script', 'forward-received', {
+    messageId,
+    method: request?.method,
+    requestId: request?.id ?? null,
+    origin: window.location.origin || 'unknown',
+    params: summarizeBridgeTraceValue(request?.params)
+  })
+
   if (bridgeContextInvalidated) {
+    void recordBridgeTrace('content-script', 'forward-blocked-context-invalidated', {
+      messageId,
+      method: request?.method,
+      requestId: request?.id ?? null
+    })
     postToPage({
       type: 'response',
       id: messageId,
@@ -266,6 +329,12 @@ function forwardRequest(request: any, messageId: number): void {
 
   const origin = window.location.origin || 'unknown'
   if (isBlockedInternalOrigin(origin)) {
+    void recordBridgeTrace('content-script', 'forward-blocked-origin', {
+      messageId,
+      method: request?.method,
+      requestId: request?.id ?? null,
+      origin
+    })
     postToPage({
       type: 'response',
       id: messageId,
@@ -288,6 +357,13 @@ function forwardRequest(request: any, messageId: number): void {
       const runtimeError = chrome.runtime.lastError
       if (runtimeError) {
         const errorMsg = runtimeError.message || 'Unknown error'
+        void recordBridgeTrace('content-script', 'forward-runtime-error', {
+          messageId,
+          method: request?.method,
+          requestId: request?.id ?? null,
+          origin,
+          message: errorMsg
+        })
         void recordRuntimeError('content-script', errorMsg, {
           kind: 'runtime-sendMessage',
           requestMethod: request?.method
@@ -313,6 +389,13 @@ function forwardRequest(request: any, messageId: number): void {
       }
 
       if (!resp || !resp.ok) {
+        void recordBridgeTrace('content-script', 'forward-response-error', {
+          messageId,
+          method: request?.method,
+          requestId: request?.id ?? null,
+          origin,
+          error: summarizeBridgeTraceValue(resp?.jsonRpc?.error ?? resp?.error ?? 'Background unavailable')
+        })
         postToPage({
           type: 'response',
           id: messageId,
@@ -324,6 +407,13 @@ function forwardRequest(request: any, messageId: number): void {
         })
         return
       }
+      void recordBridgeTrace('content-script', 'forward-response-ok', {
+        messageId,
+        method: request?.method,
+        requestId: request?.id ?? null,
+        origin,
+        result: summarizeBridgeTraceValue(resp?.jsonRpc?.result)
+      })
       postToPage({ type: 'response', id: messageId, response: resp.jsonRpc })
     }
   )

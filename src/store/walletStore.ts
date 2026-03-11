@@ -18,13 +18,15 @@ import {
 } from '../lib/utxoRpc'
 import { resolveBridgeTxKeyCandidates } from '../lib/bridgeAuth'
 import { deriveUtxoAddress, deriveUtxoAddressWithSpec, isAddressForCoinSymbol } from '../lib/utxoAddress'
+import { deriveMoneroAddress } from '../lib/moneroAddress'
+import { sendMoneroNonCustodial } from '../lib/moneroNonCustodial'
 import { getSolanaTokenRegistry } from '../lib/solanaTokenRegistry'
 import { deriveCosmosAddress, isCosmosAddressForHrp } from '../lib/cosmosAddress'
 import { signCosmosExecuteContractTxBase64, signCosmosTokenTransferTxBase64 } from '../lib/cosmosNonCustodial'
 import { normalizeServerAddress } from '../lib/serverAddressApi'
 import { resolveEvmExternalSigner, resolveEvmExternalSignerMode } from '../lib/evmExternalSigner'
 import { getBuildFeatureFlag } from '../buildConfig'
-import { isCosmosLikeModelId, requiresMnemonicForNetwork, resolveRuntimeModelId as resolveNetworkModelId } from '../lib/runtimeModel'
+import { isCosmosLikeModelId, isCroCosmosModelId, requiresMnemonicForNetwork, resolveRuntimeModelId as resolveNetworkModelId } from '../lib/runtimeModel'
 import { MIN_SYNC_PERCENT_FOR_SEND } from '../lib/sendSyncPolicy'
 import { resolveNetworkCapabilities } from '../lib/networkCapabilities'
 import {
@@ -62,6 +64,7 @@ import {
   clampDisabledNetworkIdsToMaxEnabled,
   isCroCosmosModel,
   MAX_ACTIVE_REFRESH_NETWORKS,
+  migrateLegacyDefaultDisabledNetworkIds,
   normalizeActivityList,
   normalizeActivityRecord,
   normalizeDisabledNetworkIdsForState,
@@ -179,7 +182,7 @@ export interface ChainModelLiveSnapshot {
   networkId: string
   symbol: string
   protocol: string
-  backendMode: 'evm-rpc' | 'bridge'
+  backendMode: 'evm-rpc' | 'bridge' | 'local-rpc'
   address: string
   addressValid: boolean
   balance: string
@@ -259,6 +262,16 @@ interface WalletState {
   lastActiveTimestamp: number
   activity: Activity[]
 
+  // Local RPC mode Ã¢â‚¬â€ bypasses the MetaYoshi bridge when enabled
+  useLocalRpc: boolean
+  /** Per-network local node settings, keyed by network id. */
+  localRpcOverrides: Record<string, {
+    rpcUrl: string
+    rpcUsername: string
+    rpcPassword: string
+    rpcWallet: string
+  }>
+
   // Actions
   initialize: (
     password: string,
@@ -306,6 +319,15 @@ interface WalletState {
   removeNetwork: (id: string) => void
   updateNetwork: (id: string, updates: Partial<Network>) => void
   setNetworkEnabled: (networkId: string, enabled: boolean) => void
+
+  // Local RPC settings
+  setUseLocalRpc: (enabled: boolean) => void
+  setLocalRpcOverride: (networkId: string, override: {
+    rpcUrl: string
+    rpcUsername: string
+    rpcPassword: string
+    rpcWallet: string
+  }) => void
   syncNetworksFromServer: () => Promise<void>
 
   // RPC
@@ -322,7 +344,9 @@ interface WalletState {
     maxPriorityFeePerGas?: string
     type?: 2
   }) => Promise<{ hash: string }>
+  sendXrpTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
   sendCardanoTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
+  sendMoneroTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
   sendSolanaTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
   sendStellarTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
   sendTronTransaction: (params: { to: string; amount: string }) => Promise<{ hash: string }>
@@ -409,6 +433,8 @@ let sendOperationNextAllowedAtMs = 0
 let refreshActiveBalanceInFlight: Promise<void> | null = null
 let refreshActiveBalanceQueuedOptions: RefreshActiveBalanceOptions | null = null
 const trackedActivityStatusPollers = new Set<string>()
+let xrpAddressModulePromise: Promise<typeof import('../lib/xrpAddress')> | null = null
+let xrpNonCustodialModulePromise: Promise<typeof import('../lib/xrpNonCustodial')> | null = null
 let cardanoAddressModulePromise: Promise<typeof import('../lib/cardanoAddress')> | null = null
 let cardanoNonCustodialModulePromise: Promise<typeof import('../lib/cardanoNonCustodial')> | null = null
 let solanaAddressModulePromise: Promise<typeof import('../lib/solanaAddress')> | null = null
@@ -417,6 +443,16 @@ let stellarAddressModulePromise: Promise<typeof import('../lib/stellarAddress')>
 let stellarNonCustodialModulePromise: Promise<typeof import('../lib/stellarNonCustodial')> | null = null
 let tronAddressModulePromise: Promise<typeof import('../lib/tronAddress')> | null = null
 let tronNonCustodialModulePromise: Promise<typeof import('../lib/tronNonCustodial')> | null = null
+
+function loadXrpAddressModule() {
+  if (!xrpAddressModulePromise) xrpAddressModulePromise = import('../lib/xrpAddress')
+  return xrpAddressModulePromise
+}
+
+function loadXrpNonCustodialModule() {
+  if (!xrpNonCustodialModulePromise) xrpNonCustodialModulePromise = import('../lib/xrpNonCustodial')
+  return xrpNonCustodialModulePromise
+}
 
 function loadCardanoAddressModule() {
   if (!cardanoAddressModulePromise) cardanoAddressModulePromise = import('../lib/cardanoAddress')
@@ -520,6 +556,25 @@ async function checkOnChainTransactionStatus(
       const confirmations = Number(rawInfo?.confirmations)
       if (Number.isFinite(confirmations) && confirmations >= 1) return 'confirmed'
       if (String(rawInfo?.blockhash || '').trim()) return 'confirmed'
+      return 'pending'
+    } catch {
+      return 'pending'
+    }
+  }
+
+  if (net.coinType === 'XRP') {
+    try {
+      const txInfo = await callBridgeMethod(rpcConfig, 'tx', [{ transaction: normalizedTxid, binary: false }]) as any
+      const payload = txInfo?.result ?? txInfo
+      const validated = Boolean(payload?.validated)
+      const txResult = String(
+        payload?.meta?.TransactionResult
+        || payload?.meta?.transaction_result
+        || payload?.engine_result
+        || ''
+      ).trim().toUpperCase()
+      if (txResult && txResult !== 'TESSUCCESS') return 'rejected'
+      if (validated || Number.isFinite(Number(payload?.ledger_index))) return 'confirmed'
       return 'pending'
     } catch {
       return 'pending'
@@ -647,9 +702,12 @@ function setTransientBridgeCooldown(networkId?: string): void {
 async function createUtxoRpcConfig(
   net: Network,
   opts: {
+    useLocalRpc?: boolean
+    localRpcOverride?: { rpcUrl: string; rpcUsername: string; rpcPassword: string; rpcWallet: string }
     secureBridgeSigner?: (message: string) => Promise<{ address: string; signature: string }>
   } = {}
 ): Promise<UtxoRpcConfig> {
+  const override = opts.localRpcOverride
   const bridgeTxKeyCandidates = await resolveBridgeTxKeyCandidates()
   const bridgeTxKey = bridgeTxKeyCandidates[0]
   const secureBridgeWritesEnabled = (() => {
@@ -662,10 +720,10 @@ async function createUtxoRpcConfig(
     coinSymbol: net.symbol,
     apiInterceptor: getCoinApiInterceptor(net.id),
     // Local RPC fields Ã¢â‚¬â€ use user override if set, otherwise fall back to network defaults
-    rpcUrl: net.rpcUrl,
-    rpcWallet: net.rpcWallet,
-    rpcUsername: net.rpcUsername,
-    rpcPassword: net.rpcPassword,
+    rpcUrl:      (override?.rpcUrl?.trim())      || net.rpcUrl,
+    rpcWallet:   (override?.rpcWallet?.trim())   || net.rpcWallet,
+    rpcUsername: (override?.rpcUsername?.trim()) || net.rpcUsername,
+    rpcPassword: (override?.rpcPassword?.trim()) || net.rpcPassword,
     // Bridge fields
     bridgeUrl:      net.bridgeUrl,
     bridgeUsername: net.bridgeUsername,
@@ -674,7 +732,9 @@ async function createUtxoRpcConfig(
     bridgeTxKeyCandidates,
     secureBridgeApiBaseUrl: secureBridgeApiBaseUrl || undefined,
     secureBridgeWritesEnabled,
-    secureBridgeSigner: opts.secureBridgeSigner
+    secureBridgeSigner: opts.secureBridgeSigner,
+    // Enforce bridge-first transport for app <-> server communication.
+    useLocalRpc: false
   }
 }
 
@@ -775,7 +835,7 @@ function resolveCosmosBridgeCoinId(network: Network): string {
   const resolved = String(
     network.serverCoinId
     || runtimeCoinId
-    || 'cosmos'
+    || (isCroCosmosModelId(modelId) ? 'cronos-pos' : 'cosmos')
   ).trim().toLowerCase()
   return resolved || 'cosmos'
 }
@@ -899,6 +959,7 @@ const DEFAULT_BNB_TRACKED_TOKENS: EvmTrackedToken[] = [
   { address: '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82', symbol: 'CAKE', decimals: 18 },
   { address: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8', symbol: 'ETH', decimals: 18 },
   { address: '0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c', symbol: 'BTCB', decimals: 18 },
+  { address: '0x1D2F0dA169ceB9Fc7B3144628dB156f3F6c60dBE', symbol: 'XRP', decimals: 18 },
   { address: '0x3EE2200Efb3400fAbB9AacF31297cBdD1d435D47', symbol: 'ADA', decimals: 18 },
   { address: '0xBa2aE424d960c26247Dd6c32edC70B295c744C43', symbol: 'DOGE', decimals: 8 },
   { address: '0xCE7de646e7208A4Ef112cb6ed5038FA6c0cFfDcF', symbol: 'TRX', decimals: 18 }
@@ -1084,6 +1145,17 @@ function resolveTrackedTokenEnvKeys(network: Pick<Network, 'id' | 'runtimeModelI
     add('bsc')
     add('bnb')
   }
+  if (
+    lowerNetworkId === 'bnb-testnet'
+    || lowerNetworkId === 'bsc-testnet'
+    || lowerModelId === 'bnb-testnet'
+    || lowerModelId === 'bsc-testnet'
+    || chainId === 97
+  ) {
+    add('bsc-testnet')
+    add('bnb-testnet')
+  }
+
   return [...keys]
 }
 
@@ -1105,6 +1177,7 @@ function resolveTrackedEvmTokensBase(network: Pick<Network, 'id' | 'runtimeModel
   const modelId = String(network?.runtimeModelId || networkId).trim()
   const fromEnv = resolveTrackedTokensFromEnv(network)
   if (fromEnv.length > 0) return fromEnv
+  if (networkId.toLowerCase() === 'bnb-testnet') return []
   if (modelId.toLowerCase() === 'eth') return DEFAULT_ETH_TRACKED_TOKENS
   if (modelId.toLowerCase() === 'arb') return DEFAULT_ARB_TRACKED_TOKENS
   if (modelId.toLowerCase() === 'op') return DEFAULT_OP_TRACKED_TOKENS
@@ -1131,6 +1204,23 @@ function resolveEvmChainId(network: Pick<Network, 'id' | 'runtimeModelId' | 'cha
   return null
 }
 
+function extractAssetLogoUri(row: Record<string, unknown> | null | undefined): string | undefined {
+  const value = String(
+    row?.logoURI
+    || row?.logoUri
+    || row?.logo_uri
+    || row?.logoUrl
+    || row?.logo_url
+    || row?.logo64
+    || row?.image
+    || row?.image_url
+    || row?.imageUrl
+    || row?.preview_url
+    || ''
+  ).trim()
+  return value || undefined
+}
+
 function parseRemoteTokenCandidates(payload: any): EvmTrackedToken[] {
   const values = Array.isArray(payload?.tokens)
     ? payload.tokens
@@ -1148,7 +1238,7 @@ function parseRemoteTokenCandidates(payload: any): EvmTrackedToken[] {
       address: normalizedAddress,
       symbol: symbol || shortAddress(candidateAddress),
       decimals: Number.isInteger(decimals) && decimals >= 0 && decimals <= 30 ? decimals : 18,
-      logoUri: String(row?.logoURI || row?.logo_uri || row?.logo || row?.image || '').trim() || undefined
+      logoUri: extractAssetLogoUri(row as Record<string, unknown>)
     })
   }
   return out
@@ -1623,7 +1713,8 @@ function buildEvmAssetBucketsFromBridgeRows(
     assets[assetKey] = Math.max(prev, displaySats)
     labels[assetKey] = displaySymbol
     if (tokenAddress) {
-      const logoUri = buildTrustWalletErc20LogoUri(chainId, tokenAddress)
+      const logoUri = extractAssetLogoUri(row as unknown as Record<string, unknown>)
+        || buildTrustWalletErc20LogoUri(chainId, tokenAddress)
       if (logoUri) logos[assetKey] = logoUri
     }
   }
@@ -1974,10 +2065,10 @@ function deriveApiBaseFromBridgeUrl(bridgeUrl: string): string {
   return raw
 }
 
-async function discoverEvmTokenContractsFromAddressAssets(
+async function fetchEvmTokensFromAddressAssets(
   rpcConfig: UtxoRpcConfig,
   input: { coin: string; chain: string; ownerAddress: string }
-): Promise<string[]> {
+): Promise<EvmTrackedToken[]> {
   const apiBase = deriveApiBaseFromBridgeUrl(String(rpcConfig.bridgeUrl || ''))
   if (!apiBase) return []
 
@@ -2020,19 +2111,27 @@ async function discoverEvmTokenContractsFromAddressAssets(
     }
     const json = await res.json().catch(() => null) as any
     const erc20Rows = Array.isArray(json?.assets?.erc20) ? json.assets.erc20 : []
-    const out = new Set<string>()
+    const out = new Map<string, EvmTrackedToken>()
     for (const row of erc20Rows) {
-      const candidate = normalizeEvmAddressLoose(String(
+      const address = normalizeEvmAddressLoose(String(
         row?.contractAddress
         || row?.tokenAddress
         || row?.TokenAddress
         || ''
       ).trim())
-      if (!candidate) continue
-      out.add(candidate)
+      if (!address || out.has(address)) continue
+      const symbol = String(row?.symbol || row?.ticker || row?.name || '').trim().toUpperCase() || shortAddress(address)
+      const decimalsRaw = Number(row?.decimals)
+      out.set(address, {
+        address,
+        symbol,
+        decimals: Number.isInteger(decimalsRaw) && decimalsRaw >= 0 && decimalsRaw <= 30 ? decimalsRaw : 18,
+        logoUri: extractAssetLogoUri(row as Record<string, unknown>),
+        discovered: true
+      })
       if (out.size >= 220) break
     }
-    return [...out]
+    return [...out.values()]
   } catch {
     return []
   } finally {
@@ -2274,7 +2373,8 @@ function normalizePersistedAccounts(rawAccounts: unknown): Account[] {
         BTC: addresses.BTC ?? '',
         COSMOS: addresses.COSMOS ?? '',
         SOL: addresses.SOL ?? '',
-        SUI: addresses.SUI ?? ''
+        SUI: addresses.SUI ?? '',
+        XRP: addresses.XRP ?? ''
       },
       networkAddresses: networkAddresses,
       networkBalances: networkBalances,
@@ -2411,6 +2511,8 @@ export const useWalletStore = create<WalletState>()(
       autolockMinutes: 5,
       donationPercent: MIN_DONATION_PERCENT,
       lastActiveTimestamp: Date.now(),
+      useLocalRpc: false,
+      localRpcOverrides: {},
       activity: [
         {
           id: '1',
@@ -2527,7 +2629,7 @@ export const useWalletStore = create<WalletState>()(
               name: 'Account 1',
               networkNames: {},
               derivationIndex: 0,
-              addresses: { EVM: '', UTXO: '', BTC: '', COSMOS: '', SOL: '', SUI: '' },
+              addresses: { EVM: '', UTXO: '', BTC: '', COSMOS: '', SOL: '', SUI: '', XRP: '' },
               networkAddresses: {},
               networkBalances: {},
               balance: '0'
@@ -2547,7 +2649,8 @@ export const useWalletStore = create<WalletState>()(
                 BTC: account.addresses?.BTC || '',
                 COSMOS: account.addresses?.COSMOS || '',
                 SOL: account.addresses?.SOL || '',
-                SUI: account.addresses?.SUI || ''
+                SUI: account.addresses?.SUI || '',
+                XRP: account.addresses?.XRP || ''
               },
               networkNames: { ...(account.networkNames ?? {}) },
               networkAddresses: { ...(account.networkAddresses ?? {}) },
@@ -2658,6 +2761,7 @@ export const useWalletStore = create<WalletState>()(
             if (isAddressForCoinSymbol(existing, net.coinSymbol)) return existing
           } else if (
             net.coinType === 'EVM'
+            || net.coinType === 'XRP'
             || modelId === 'sol'
             || modelId === 'xlm'
             || modelId === 'tron'
@@ -2839,7 +2943,9 @@ export const useWalletStore = create<WalletState>()(
           accounts,
           activeAccountId,
           serverCoinCatalog,
-          activity
+          activity,
+          useLocalRpc: ulr,
+          localRpcOverrides: lro
         } = get()
         const net = networks.find(n => n.id === activeNetworkId)
         const acc = accounts.find(a => a.id === activeAccountId) || accounts[0]
@@ -2952,10 +3058,10 @@ export const useWalletStore = create<WalletState>()(
               address,
               activityTxids
             ).catch(() => [])
-            let assetsEndpointContracts: string[] = []
+            let assetsEndpointTokens: EvmTrackedToken[] = []
             if (!addressAssetsEndpointUnsupported) {
               try {
-                assetsEndpointContracts = await discoverEvmTokenContractsFromAddressAssets(rpcConfig, {
+                assetsEndpointTokens = await fetchEvmTokensFromAddressAssets(rpcConfig, {
                   coin: bridgeCoin,
                   chain: bridgeChain,
                   ownerAddress: address
@@ -2983,18 +3089,24 @@ export const useWalletStore = create<WalletState>()(
                 discovered: true
               })
             }
-            for (const discoveredAddress of assetsEndpointContracts) {
-              if (trackedByAddress.has(discoveredAddress)) continue
-              trackedByAddress.set(discoveredAddress, {
-                address: discoveredAddress,
-                symbol: shortAddress(discoveredAddress),
-                decimals: 18,
-                discovered: true
-              })
+            for (const token of assetsEndpointTokens) {
+              const existing = trackedByAddress.get(token.address)
+              if (existing) {
+                const shouldPreferServerMeta = existing.discovered === true
+                trackedByAddress.set(token.address, {
+                  ...existing,
+                  discovered: existing.discovered || token.discovered,
+                  logoUri: existing.logoUri || token.logoUri,
+                  symbol: shouldPreferServerMeta ? (token.symbol || existing.symbol) : existing.symbol,
+                  decimals: shouldPreferServerMeta ? token.decimals : existing.decimals
+                })
+                continue
+              }
+              trackedByAddress.set(token.address, token)
             }
 
             let mergedTokens = [...trackedByAddress.values()]
-            if (discoveredAddresses.length === 0 && assetsEndpointContracts.length === 0 && mergedTokens.length > 80) {
+            if (discoveredAddresses.length === 0 && assetsEndpointTokens.length === 0 && mergedTokens.length > 80) {
               // Shared/public RPC providers often throttle large token scan bursts.
               // Keep scan bounded when no dynamic discovery source produced candidates.
               mergedTokens = mergedTokens.slice(0, 80)
@@ -3221,7 +3333,8 @@ export const useWalletStore = create<WalletState>()(
                   fungibleAssets[assetKey] = Math.max(prev, displaySats)
                   fungibleAssetLabels[assetKey] = displaySymbol
                   if (tokenAddress) {
-                    const logoUri = buildTrustWalletErc20LogoUri(chainId, tokenAddress)
+                    const logoUri = extractAssetLogoUri(row as unknown as Record<string, unknown>)
+                      || buildTrustWalletErc20LogoUri(chainId, tokenAddress)
                     if (logoUri) fungibleAssetLogos[assetKey] = logoUri
                   }
                   bridgeFallbackRowsApplied += 1
@@ -3349,6 +3462,8 @@ export const useWalletStore = create<WalletState>()(
 
         if (activeModelId === 'xlm') {
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           try {
@@ -3403,8 +3518,56 @@ export const useWalletStore = create<WalletState>()(
           return
         }
 
+        if (net.coinType === 'XRP' || activeModelId === 'xrp') {
+          const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
+            secureBridgeSigner: get().signBackendAuthMessage
+          })
+          try {
+            const raw = await callBridgeMethod(rpcConfig, 'account_lines', [{
+              account: address,
+              ledger_index: 'validated'
+            }])
+            const lines =
+              raw?.lines
+              ?? raw?.result?.lines
+              ?? raw?.result?.result?.lines
+              ?? []
+            const rows: any[] = Array.isArray(lines) ? lines : []
+            const assets: Record<string, number> = {}
+            for (const line of rows) {
+              const currency = String(line?.currency || '').trim().toUpperCase()
+              const issuer = String(line?.account || line?.issuer || '').trim()
+              const balText = String(line?.balance ?? '').trim()
+              if (!currency || !issuer || !/^-?\\d+(\\.\\d+)?$/.test(balText)) continue
+              const balNum = Number(balText)
+              if (!Number.isFinite(balNum) || balNum === 0) continue
+              assets[`${currency}|${issuer}`] = Math.round(Math.abs(balNum) * 1e8)
+            }
+            set((state) => buildScopedAssetStateUpdate(state, requestAccountId, requestNetworkId, {
+              assets,
+              logos: {},
+              labels: {},
+              evmNfts: {}
+            }))
+
+            networkAssetsCache.get(
+              cacheKey,
+              async () => ({ assets, logos: {}, labels: {} }),
+              undefined,
+              { force: true }
+            ).catch(() => {})
+          } catch (err) {
+            console.warn(`[${net.symbol}] fetchNetworkAssets (XRP) failed:`, err)
+          }
+          return
+        }
+
         if (activeModelId === 'ada') {
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           try {
@@ -3446,6 +3609,8 @@ export const useWalletStore = create<WalletState>()(
 
         if (isCosmosLikeModelId(activeModelId)) {
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           try {
@@ -3518,6 +3683,8 @@ export const useWalletStore = create<WalletState>()(
               isNft?: boolean
               tokenType?: string
               symbol?: string
+              name?: string
+              logoUri?: string
             }> = []
 
             const env = ((import.meta as any)?.env || {}) as Record<string, unknown>
@@ -3530,6 +3697,8 @@ export const useWalletStore = create<WalletState>()(
 
             try {
               const rpcConfig = await createUtxoRpcConfig(net, {
+                useLocalRpc: ulr,
+                localRpcOverride: lro[net.id],
                 secureBridgeSigner: get().signBackendAuthMessage
               })
               const bridgeRows = await fetchBridgeTokenBalances(rpcConfig, {
@@ -3550,7 +3719,9 @@ export const useWalletStore = create<WalletState>()(
                   amountUi: String(row.balance || '0').trim() || '0',
                   decimals: Number.isFinite(decimals) ? Math.max(0, Math.trunc(decimals)) : 0,
                   tokenType: String(row.tokenType || '').trim(),
-                  symbol: String(row.symbol || '').trim().toUpperCase() || undefined
+                  symbol: String(row.symbol || '').trim().toUpperCase() || undefined,
+                  name: String(row.name || '').trim() || undefined,
+                  logoUri: String(row.logoUri || '').trim() || undefined
                 })
               }
               rows = normalized
@@ -3568,7 +3739,9 @@ export const useWalletStore = create<WalletState>()(
                   amountUi: String(row.amountUi || '').trim(),
                   decimals: Number.isFinite(row.decimals) ? Math.max(0, Math.trunc(row.decimals)) : 0,
                   isNft: Boolean(row.isNft),
-                  symbol: String((row as any)?.symbol || '').trim().toUpperCase() || undefined
+                  symbol: String((row as any)?.symbol || '').trim().toUpperCase() || undefined,
+                  name: String((row as any)?.name || '').trim() || undefined,
+                  logoUri: String((row as any)?.logoUri || '').trim() || undefined
                 }))
               } catch {
                 rows = []
@@ -3595,12 +3768,15 @@ export const useWalletStore = create<WalletState>()(
 
               assets[assetKey] = displaySats
               const info = registry[tokenId]
+              const rowName = String(row.name || '').trim()
               const onchainSymbol = String(row.symbol || '').trim().toUpperCase()
-              const displayTicker = onchainSymbol || String(info?.symbol || '').trim().toUpperCase() || tokenId
-              if (solAssetType === 'spl-token') labels[assetKey] = displayTicker
-              else if (solAssetType === 'spl-nft') labels[assetKey] = `${displayTicker} (SPL NFT)`
-              else labels[assetKey] = `${displayTicker} (Compressed NFT)`
-              const logoUri = String(info?.logoURI || '').trim()
+              const registryName = String(info?.name || '').trim()
+              const registrySymbol = String(info?.symbol || '').trim().toUpperCase()
+              const displayName = rowName || registryName || onchainSymbol || registrySymbol || tokenId
+              if (solAssetType === 'spl-token') labels[assetKey] = displayName
+              else if (solAssetType === 'spl-nft') labels[assetKey] = `${displayName} (SPL NFT)`
+              else labels[assetKey] = `${displayName} (Compressed NFT)`
+              const logoUri = String(row.logoUri || info?.logoURI || '').trim()
               if (logoUri) logos[assetKey] = logoUri
             }
             set((state) => buildScopedAssetStateUpdate(state, requestAccountId, requestNetworkId, {
@@ -3622,9 +3798,17 @@ export const useWalletStore = create<WalletState>()(
           return
         }
 
-        const rpcConfig = await createUtxoRpcConfig(net, {
+        const baseRpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc: ulr,
+          localRpcOverride: lro[net.id],
           secureBridgeSigner: get().signBackendAuthMessage
         })
+        const rpcConfig: UtxoRpcConfig = {
+          ...baseRpcConfig,
+          // UTXO asset-layer reads can be slow on shared bridge wallets.
+          // Give the bridge more headroom before surfacing a timeout.
+          timeoutMs: Math.max(Number(baseRpcConfig.timeoutMs ?? 10000), 30000)
+        }
 
         try {
           const assets = await listAssetBalancesByAddress(rpcConfig, address)
@@ -3659,6 +3843,8 @@ export const useWalletStore = create<WalletState>()(
         const {
           networks,
           activeNetworkId,
+          useLocalRpc: ulr,
+          localRpcOverrides: lro,
           evmNftAssets,
           networkAssets,
           networkAssetLogos,
@@ -3697,6 +3883,28 @@ export const useWalletStore = create<WalletState>()(
             contract_address: contract,
             txid_or_longname: normalizedAssetId,
             ownership_address: ''
+          }
+        }
+
+        if (net.coinType === 'XRP' || modelId === 'xrp') {
+          const [currency, issuer] = normalizedAssetId.split('|').map((v) => String(v || '').trim())
+          const knownRaw = Number(networkAssets?.[activeNetworkId]?.[normalizedAssetId] ?? 0)
+          const amountUi = Number.isFinite(knownRaw) ? (knownRaw / 1e8) : 0
+          const explorerBase = String(net.explorerUrl || 'https://xrpscan.com').trim().replace(/\/+$/, '')
+          const ref = issuer ? `${explorerBase}/account/${issuer}` : undefined
+          return {
+            name: currency || normalizedAssetId,
+            amount: Number.isFinite(amountUi) ? amountUi : 0,
+            units: 0,
+            reissuable: false,
+            has_ipfs: false,
+            ipfs_hash: undefined,
+            preview_url: ref || undefined,
+            metadata_url: ref || undefined,
+            token_id: normalizedAssetId,
+            contract_address: '',
+            txid_or_longname: normalizedAssetId,
+            ownership_address: issuer || ''
           }
         }
 
@@ -3882,6 +4090,8 @@ export const useWalletStore = create<WalletState>()(
           const activeAcc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
           const owner = String(activeAcc?.networkAddresses?.[activeNetworkId] || '').trim()
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           const rows = await fetchBridgeTokenBalances(rpcConfig, {
@@ -3921,6 +4131,8 @@ export const useWalletStore = create<WalletState>()(
           const activeAcc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
           const owner = String(activeAcc?.networkAddresses?.[activeNetworkId] || '').trim()
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           const rows = await fetchBridgeTokenBalances(rpcConfig, {
@@ -3958,9 +4170,11 @@ export const useWalletStore = create<WalletState>()(
           } = get()
           const activeAcc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
           const owner = String(activeAcc?.networkAddresses?.[activeNetworkId] || '').trim()
-              const rpcConfig = await createUtxoRpcConfig(net, {
-                secureBridgeSigner: get().signBackendAuthMessage
-              })
+          const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr,
+            localRpcOverride: lro[net.id],
+            secureBridgeSigner: get().signBackendAuthMessage
+          })
           const rows = await fetchBridgeTokenBalances(rpcConfig, {
             coin: resolveCosmosBridgeCoinId(net),
             chain: String(net.serverChain || 'main').trim() || 'main',
@@ -3992,26 +4206,30 @@ export const useWalletStore = create<WalletState>()(
           const explorerBase = String(net.explorerUrl || 'https://solscan.io').trim().replace(/\/+$/, '')
           const mint = extractSolanaMintFromAssetId(normalizedAssetId)
           const tokenRef = mint ? `${explorerBase}/token/${encodeURIComponent(mint)}` : undefined
+          const storedLabel = String(get().networkAssetLabels?.[activeNetworkId]?.[normalizedAssetId] || '').trim()
+          const storedLogoUri = String(get().networkAssetLogos?.[activeNetworkId]?.[normalizedAssetId] || '').trim()
 
           let symbol = ''
+          let name = ''
           let logoUri = ''
           try {
             const registry = await getSolanaTokenRegistry()
             const info = registry[mint]
             symbol = String(info?.symbol || '').trim().toUpperCase()
+            name = String(info?.name || '').trim()
             logoUri = String(info?.logoURI || '').trim()
           } catch {
             // ignore registry failures
           }
 
           return {
-            name: symbol || mint || normalizedAssetId,
+            name: storedLabel || name || symbol || mint || normalizedAssetId,
             amount: Number.isFinite(amountUi) ? amountUi : 0,
             units: 0,
             reissuable: false,
             has_ipfs: false,
             ipfs_hash: undefined,
-            preview_url: logoUri || tokenRef,
+            preview_url: storedLogoUri || logoUri || tokenRef,
             metadata_url: tokenRef,
             token_id: normalizedAssetId,
             contract_address: mint,
@@ -4021,6 +4239,8 @@ export const useWalletStore = create<WalletState>()(
         }
 
         const rpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc: ulr,
+          localRpcOverride: lro[net.id],
           secureBridgeSigner: get().signBackendAuthMessage
         })
         const splitMatch = normalizedAssetId.match(/^([^|/#:]+)[|/#:]([^|/#:]+)$/)
@@ -4323,7 +4543,7 @@ export const useWalletStore = create<WalletState>()(
         await waitForSendOperationSlot()
         const {
           networks, activeNetworkId, isLocked, sessionMnemonic,
-          accounts, activeAccountId, serverCoinCatalog, networkAssetLogos
+          accounts, activeAccountId, serverCoinCatalog, networkAssetLogos, useLocalRpc: ulr2, localRpcOverrides: lro2
         } = get()
 
         const net = networks.find(n => n.id === activeNetworkId)
@@ -4390,6 +4610,8 @@ export const useWalletStore = create<WalletState>()(
           if (!normalizedAssetId) throw new Error('Token id is required')
           const nft = parseEvmNftAssetKey(normalizedAssetId)
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr2,
+            localRpcOverride: lro2[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           const modelPreferences = get().getNetworkModelPreferences(activeNetworkId)
@@ -4694,6 +4916,8 @@ export const useWalletStore = create<WalletState>()(
           }
 
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc: ulr2,
+            localRpcOverride: lro2[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           let signedTxBase64 = ''
@@ -4772,6 +4996,8 @@ export const useWalletStore = create<WalletState>()(
         const derived = await deriveUtxoAddress(sessionMnemonic!, net.coinSymbol, accountIndex, 0, 0)
 
         const rpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc: ulr2,
+          localRpcOverride: lro2[net.id],
           secureBridgeSigner: get().signBackendAuthMessage
         })
         const rawFeePerByteCoins = net.feePerByte ?? estimateNetworkFee(net.id, 1) ?? 0.0000002
@@ -4821,7 +5047,8 @@ export const useWalletStore = create<WalletState>()(
               BTC:  acc.addresses?.BTC || '',
               COSMOS: derived.addresses.COSMOS || acc.addresses?.COSMOS || '',
               SOL:  acc.addresses?.SOL || '',
-              SUI:  derived.addresses.SUI || acc.addresses?.SUI || ''
+              SUI:  derived.addresses.SUI || acc.addresses?.SUI || '',
+              XRP:  derived.addresses.XRP || acc.addresses?.XRP || ''
             },
             networkAddresses: {
               ...(acc.networkAddresses ?? {}),
@@ -4949,6 +5176,8 @@ export const useWalletStore = create<WalletState>()(
               let rpcConfig: UtxoRpcConfig | null = null
               try {
                 rpcConfig = await createUtxoRpcConfig(net, {
+                  useLocalRpc: state.useLocalRpc,
+                  localRpcOverride: state.localRpcOverrides?.[net.id],
                   secureBridgeSigner: get().signBackendAuthMessage
                 })
               } catch {
@@ -5000,10 +5229,11 @@ export const useWalletStore = create<WalletState>()(
           throw new Error(`Could not derive ${selectedNetwork.symbol} address for account ${normalizedName}`)
         }
 
-        const addresses: Record<CoinType, string> = { EVM: '', UTXO: '', BTC: '', COSMOS: '', SOL: '', SUI: '' }
+        const addresses: Record<CoinType, string> = { EVM: '', UTXO: '', BTC: '', COSMOS: '', SOL: '', SUI: '', XRP: '' }
         if (selectedNetwork.coinType === 'EVM') addresses.EVM = selectedAddress
         if (selectedNetwork.coinType === 'UTXO') addresses.UTXO = selectedAddress
         if (selectedNetwork.coinType === 'COSMOS') addresses.COSMOS = selectedAddress
+        if (selectedNetwork.coinType === 'XRP') addresses.XRP = selectedAddress
         if (selectedModelId === 'sol') addresses.SOL = selectedAddress
 
         const newAccount: Account = {
@@ -5185,6 +5415,26 @@ export const useWalletStore = create<WalletState>()(
           })()
         }
       },
+
+      setUseLocalRpc: (enabled) => set({ useLocalRpc: enabled }),
+
+      setLocalRpcOverride: (networkId, override) =>
+        set((state) => {
+          const canonicalNetworkId = normalizeNetworkIdAlias(String(networkId || '').trim())
+          if (!canonicalNetworkId) return state
+          const nextOverrides = { ...(state.localRpcOverrides || {}) }
+          // Keep a single canonical override key per network id alias family.
+          for (const key of Object.keys(nextOverrides)) {
+            if (key === canonicalNetworkId) continue
+            if (normalizeNetworkIdAlias(String(key || '').trim()) === canonicalNetworkId) {
+              delete nextOverrides[key]
+            }
+          }
+          nextOverrides[canonicalNetworkId] = override
+          return {
+            localRpcOverrides: nextOverrides
+          }
+        }),
 
       syncNetworksFromServer: async () => {
         let serverNetworks: Network[] | null = null
@@ -5369,8 +5619,33 @@ export const useWalletStore = create<WalletState>()(
               lowSyncStreak: 0,
               accounts: updateAccountsWithNetworkBalance(state.accounts, acc.id, activeNetworkId, snapshot.balance)
             }))
-        } else if (net.coinType === 'COSMOS' || modelId === 'cosmos') {
+        } else if (net.coinType === 'XRP') {
+          const { useLocalRpc, localRpcOverrides } = get()
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc,
+            localRpcOverride: localRpcOverrides[net.id],
+            secureBridgeSigner: get().signBackendAuthMessage
+          })
+          const snapshot = await cachedFetchChainBalanceAndSync({
+            network: net,
+            address,
+            rpcConfig,
+            force: fastMode
+          })
+          await waitForUiStabilize()
+          if (isStaleRequest()) return
+          set((state) => ({
+            isSyncing: snapshot.isSyncing,
+            isConnected: true,
+            syncPercent: snapshot.syncPercent,
+            lowSyncStreak: computeLowSyncStreak(state.lowSyncStreak, snapshot, MIN_SYNC_PERCENT_FOR_SEND),
+            accounts: updateAccountsWithNetworkBalance(state.accounts, acc.id, activeNetworkId, snapshot.balance)
+          }))
+        } else if (net.coinType === 'COSMOS' || modelId === 'cosmos') {
+          const { useLocalRpc, localRpcOverrides } = get()
+          const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc,
+            localRpcOverride: localRpcOverrides[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           const snapshot = await cachedFetchChainBalanceAndSync({
@@ -5389,11 +5664,14 @@ export const useWalletStore = create<WalletState>()(
             accounts: updateAccountsWithNetworkBalance(state.accounts, acc.id, activeNetworkId, snapshot.balance)
           }))
         } else if (net.coinType === 'UTXO') {
+        const { useLocalRpc, localRpcOverrides } = get()
         const rpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc,
+          localRpcOverride: localRpcOverrides[net.id],
           secureBridgeSigner: get().signBackendAuthMessage
         })
         const isBtczBridgeMode =
-          String(net.coinSymbol || '').trim().toUpperCase() === 'BTCZ'
+          String(net.coinSymbol || '').trim().toUpperCase() === 'BTCZ' && !useLocalRpc
         const snapshot = await cachedFetchChainBalanceAndSync({
           network: net,
           address,
@@ -5413,7 +5691,31 @@ export const useWalletStore = create<WalletState>()(
               accounts: updateAccountsWithNetworkBalance(state.accounts, acc.id, activeNetworkId, snapshot.balance)
             }))
           } else if (modelId === 'ada') {
+            const { useLocalRpc, localRpcOverrides } = get()
             const rpcConfig = await createUtxoRpcConfig(net, {
+              useLocalRpc,
+              localRpcOverride: localRpcOverrides[net.id],
+              secureBridgeSigner: get().signBackendAuthMessage
+            })
+            const snapshot = await fetchChainBalanceAndSync({
+              network: net,
+              address,
+              rpcConfig
+            })
+            await waitForUiStabilize()
+            if (isStaleRequest()) return
+            set((state) => ({
+              isSyncing: snapshot.isSyncing,
+              isConnected: true,
+              syncPercent: snapshot.syncPercent,
+              lowSyncStreak: computeLowSyncStreak(state.lowSyncStreak, snapshot, MIN_SYNC_PERCENT_FOR_SEND),
+              accounts: updateAccountsWithNetworkBalance(state.accounts, acc.id, activeNetworkId, snapshot.balance)
+            }))
+          } else if (modelId === 'xmr') {
+            const { useLocalRpc, localRpcOverrides } = get()
+            const rpcConfig = await createUtxoRpcConfig(net, {
+              useLocalRpc,
+              localRpcOverride: localRpcOverrides[net.id],
               secureBridgeSigner: get().signBackendAuthMessage
             })
             const snapshot = await fetchChainBalanceAndSync({
@@ -5556,7 +5858,7 @@ export const useWalletStore = create<WalletState>()(
       },
 
       probeActiveChainModel: async () => {
-        const { networks, activeNetworkId, accounts, activeAccountId } = get()
+        const { networks, activeNetworkId, accounts, activeAccountId, useLocalRpc, localRpcOverrides } = get()
         const net = networks.find((n) => n.id === activeNetworkId)
         const acc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
         if (!net || !acc) throw new Error('No active account/network')
@@ -5567,7 +5869,7 @@ export const useWalletStore = create<WalletState>()(
         const backendMode: ChainModelLiveSnapshot['backendMode'] =
           net.coinType === 'EVM'
             ? 'evm-rpc'
-            : 'bridge'
+            : (useLocalRpc ? 'local-rpc' : 'bridge')
 
         // For unsupported coins, probing must not call the backend bridge or attempt server-managed derivation.
         let address: string | null = acc.networkAddresses?.[activeNetworkId] ?? null
@@ -5644,6 +5946,8 @@ export const useWalletStore = create<WalletState>()(
           }
 
           const rpcConfig = await createUtxoRpcConfig(net, {
+            useLocalRpc,
+            localRpcOverride: localRpcOverrides[net.id],
             secureBridgeSigner: get().signBackendAuthMessage
           })
           const [snapshot, addressValid] = await Promise.all([
@@ -5829,6 +6133,46 @@ export const useWalletStore = create<WalletState>()(
         return { hash: String(relayed.txid) }
       },
 
+      sendXrpTransaction: async ({ to, amount }) => {
+        await waitForSendOperationSlot()
+        const { networks, activeNetworkId, accounts, activeAccountId, sessionMnemonic, isLocked, useLocalRpc, localRpcOverrides } = get()
+        if (isLocked || !sessionMnemonic) throw new Error('Wallet is locked')
+        const net = networks.find((n) => n.id === activeNetworkId)
+        if (!net || net.coinType !== 'XRP') throw new Error('Active network is not XRP')
+        const acc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
+        if (!acc) throw new Error('No active account')
+        const accountIndex = resolveDerivationIndex(acc, accounts.findIndex((a) => a.id === acc.id))
+        const { deriveXrpAddress } = await loadXrpAddressModule()
+        const derived = await deriveXrpAddress(sessionMnemonic, accountIndex)
+        const activeAddress = String(
+          acc.networkAddresses?.[activeNetworkId]
+          || acc.addresses?.XRP
+          || derived.address
+        ).trim()
+        if (activeAddress !== derived.address) {
+          throw new Error(`Active XRP address does not match derived signer address (${activeAddress} != ${derived.address})`)
+        }
+        const rpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc,
+          localRpcOverride: localRpcOverrides[net.id],
+          secureBridgeSigner: get().signBackendAuthMessage
+        })
+        const { sendXrpNonCustodial } = await loadXrpNonCustodialModule()
+        return await sendChainTransaction({
+          network: net,
+          to,
+          amount,
+          xrpSend: () => sendXrpNonCustodial({
+            rpcConfig,
+            fromAddress: activeAddress,
+            toAddress: to,
+            amountXrp: amount,
+            privateKeyHex: derived.privHex,
+            publicKeyHex: derived.pubHex
+          })
+        })
+      },
+
       sendCardanoTransaction: async ({ to, amount }) => {
         await waitForSendOperationSlot()
         const { networks, activeNetworkId, accounts, activeAccountId, sessionMnemonic, isLocked } = get()
@@ -5849,6 +6193,27 @@ export const useWalletStore = create<WalletState>()(
           toAddress: to,
           amountAda: amount,
           walletId: String(net.rpcWallet || '').trim() || undefined
+        })
+      },
+
+      sendMoneroTransaction: async ({ to, amount }) => {
+        await waitForSendOperationSlot()
+        const { networks, activeNetworkId, accounts, activeAccountId, sessionMnemonic, isLocked } = get()
+        if (isLocked || !sessionMnemonic) throw new Error('Wallet is locked')
+        const net = networks.find((n) => n.id === activeNetworkId)
+        const modelId = resolveNetworkModelId(net)
+        if (!net || modelId !== 'xmr') throw new Error('Active network is not Monero')
+        const acc = accounts.find((a) => a.id === activeAccountId) || accounts[0]
+        const accountIndex = resolveDerivationIndex(acc, accounts.findIndex((a) => a.id === acc.id))
+        const fromAddress = acc?.networkAddresses?.[activeNetworkId] || await get().ensureNetworkAddress(activeNetworkId)
+        if (!fromAddress) throw new Error(`No address derived for ${net.name}`)
+        return await sendMoneroNonCustodial({
+          network: net,
+          mnemonic: sessionMnemonic,
+          accountIndex,
+          fromAddress,
+          toAddress: to,
+          amountXmr: amount
         })
       },
 
@@ -5929,7 +6294,7 @@ export const useWalletStore = create<WalletState>()(
 
       sendUtxoTransaction: async ({ to, amount, memo, donation }) => {
         await waitForSendOperationSlot()
-        const { networks, activeNetworkId, accounts, activeAccountId, sessionMnemonic, isLocked } = get()
+        const { networks, activeNetworkId, accounts, activeAccountId, sessionMnemonic, isLocked, useLocalRpc: ulr3, localRpcOverrides: lro3 } = get()
         if (isLocked || !sessionMnemonic) throw new Error('Wallet is locked')
 
         const net = networks.find((n) => n.id === activeNetworkId)
@@ -5953,6 +6318,8 @@ export const useWalletStore = create<WalletState>()(
         if (!senderAddress) throw new Error(`No address derived for ${net.name}`)
 
         const rpcConfig = await createUtxoRpcConfig(net, {
+          useLocalRpc: ulr3,
+          localRpcOverride: lro3[net.id],
           secureBridgeSigner: get().signBackendAuthMessage
         })
 
@@ -6055,7 +6422,10 @@ export const useWalletStore = create<WalletState>()(
           : (accounts[0]?.id ?? null)
         const normalizedNetworks = normalizeNetworkListSymbols(INITIAL_NETWORKS)
         const normalizedDisabledNetworkIds = clampDisabledNetworkIdsToMaxEnabled(
-          (persisted as any).disabledNetworkIds ?? (merged as any).disabledNetworkIds ?? [],
+          migrateLegacyDefaultDisabledNetworkIds(
+            (persisted as any).disabledNetworkIds ?? (merged as any).disabledNetworkIds ?? [],
+            normalizedNetworks
+          ),
           normalizedNetworks
         )
         const normalizedPersistedNetworkId = normalizeNetworkIdAlias(String(merged.activeNetworkId || ''))
@@ -6104,6 +6474,14 @@ export const useWalletStore = create<WalletState>()(
             Array.isArray((persisted as any).serverCoinCatalog)
               ? ((persisted as any).serverCoinCatalog as ServerCoinCatalogItem[])
               : []
+          ),
+          localRpcOverrides: remapNetworkIdKeyedRecord(
+            ((persisted as any).localRpcOverrides ?? merged.localRpcOverrides ?? {}) as Record<string, {
+              rpcUrl: string
+              rpcUsername: string
+              rpcPassword: string
+              rpcWallet: string
+            }>
           ),
           networkAssets: {},
           networkAssetLogos: {},

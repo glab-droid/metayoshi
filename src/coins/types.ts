@@ -1,7 +1,7 @@
 import type { NetworkCapabilitiesInput } from '../lib/networkCapabilities'
 export type { NetworkCapabilitiesInput } from '../lib/networkCapabilities'
 
-export type CoinType = 'EVM' | 'UTXO' | 'BTC' | 'SOL' | 'COSMOS' | 'SUI'
+export type CoinType = 'EVM' | 'UTXO' | 'BTC' | 'SOL' | 'XRP' | 'COSMOS' | 'SUI'
 
 export interface NetworkDerivationSupport {
   status: 'supported' | 'unsupported'
@@ -11,7 +11,7 @@ export interface NetworkDerivationSupport {
 
 export interface Network {
   id: string
-  /** Canonical app runtime model id (e.g. eth, doge, cosmos) for dynamic server-mapped networks. */
+  /** Canonical app runtime model id (e.g. eth, doge, xmr) for dynamic server-mapped networks. */
   runtimeModelId?: string
   /** Original server coin id from /v1/coins when network was loaded dynamically. */
   serverCoinId?: string

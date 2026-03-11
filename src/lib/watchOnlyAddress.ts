@@ -25,6 +25,22 @@ export function validateWatchOnlyAddress(network: Network, rawAddress: string): 
     return { ok: true, normalized }
   }
 
+  if (network.id === 'xmr' || network.coinSymbol === 'XMR') {
+    const normalized = input
+    const len = normalized.length
+    const startsOk = normalized.startsWith('4') || normalized.startsWith('8') || normalized.startsWith('9')
+    const lengthOk = len === 95 || len === 106
+    const charsetOk = BASE58_RE.test(normalized)
+    if (!startsOk || !lengthOk || !charsetOk) {
+      return {
+        ok: false,
+        normalized,
+        error: 'Invalid Monero watch-only address. Expected a base58 primary/sub/integrated address.'
+      }
+    }
+    return { ok: true, normalized }
+  }
+
   return { ok: false, normalized: input, error: `${network.name} does not support watch-only import here` }
 }
 

@@ -61,5 +61,8 @@ export async function validateProtocolAddress(
     const { ethers } = await loadEthersModule()
     return ethers.isAddress(value)
   }
+  if (protocol === 'xrp-jsonrpc-compat') {
+    return /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test(value) || /^X[1-9A-HJ-NP-Za-km-z]{46,60}$/.test(value)
+  }
   return null
 }

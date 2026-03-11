@@ -5,10 +5,7 @@ node_modules/
 .dist/
 dist/
 dist-*/
-dist-chromium/
-dist-firefox/
 coverage/
-*.tsbuildinfo
 
 # Extension packaging/signing artifacts
 *.zip
@@ -18,23 +15,12 @@ web-ext-artifacts/
 
 # Environment and local config
 .env
-.env.*
-!.env.example
-!.env.sample
-!.env.template
-*.local
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 metayoshi.build.json
-
-# Internal agent / AI workflow files
-AGENTS.md
-agents/
-skills/
-.codex/
-.cursor/
-.claude/
-.roo/
-.windsurf/
-.aider*
 
 # Logs and diagnostics
 *.log
@@ -43,15 +29,23 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 reports/
-.eslintcache
 
-# OS / editor noise
+# OS/editor noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Local backups / temp files
+# Local backups/temp files
 *.bak
 *.tmp
 *.temp
+dist
+dist-firefox
+dist-chromium
+
+# Guard against accidental build output under source asset folders
+src/coins/logos/*.js
+src/coins/logos/*.css
+src/coins/logos/*.wasm
+dist

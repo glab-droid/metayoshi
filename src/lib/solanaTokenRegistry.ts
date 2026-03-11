@@ -1,3 +1,4 @@
+import cbBtcLogo from '../coins/logos/cbbtc.png'
 import { createRequestCache } from './requestCache'
 
 export type SolanaTokenRegistryEntry = {
@@ -20,6 +21,23 @@ const SOLANA_TOKEN_REGISTRY_FALLBACK_URLS = [
   'https://raw.githubusercontent.com/solana-labs/token-list/main/src/tokens/solana.tokenlist.json',
   'https://cdn.jsdelivr.net/gh/solana-labs/token-list@main/src/tokens/solana.tokenlist.json'
 ]
+
+const STATIC_SOLANA_TOKEN_REGISTRY_ENTRIES: Record<string, SolanaTokenRegistryEntry> = {
+  cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij: {
+    address: 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij',
+    symbol: 'cbBTC',
+    name: 'Coinbase Wrapped BTC',
+    decimals: 8,
+    logoURI: cbBtcLogo
+  },
+  H5wjdiCbnycv7aFDPu9crV2Hr1Mve8zqprTfFLfqqqiE: {
+    address: 'H5wjdiCbnycv7aFDPu9crV2Hr1Mve8zqprTfFLfqqqiE',
+    symbol: 'cbBTC',
+    name: 'Coinbase Wrapped BTC',
+    decimals: 8,
+    logoURI: cbBtcLogo
+  }
+}
 
 function normalizeMint(mint: string): string {
   return String(mint || '').trim()
@@ -76,7 +94,7 @@ export async function getSolanaTokenRegistry(): Promise<Record<string, SolanaTok
     const configuredUrl = String(env?.VITE_SOL_TOKEN_REGISTRY_URL || '').trim()
     const allowPublicRegistry = readEnvFlag('VITE_SOL_ALLOW_PUBLIC_TOKEN_REGISTRY', false)
     // Default behavior: no external token-registry call unless explicitly allowed/configured.
-    if (!configuredUrl && !allowPublicRegistry) return {}
+    if (!configuredUrl && !allowPublicRegistry) return { ...STATIC_SOLANA_TOKEN_REGISTRY_ENTRIES }
 
     const urls = configuredUrl
       ? [configuredUrl, ...SOLANA_TOKEN_REGISTRY_FALLBACK_URLS.filter((u) => u !== configuredUrl)]
@@ -86,13 +104,18 @@ export async function getSolanaTokenRegistry(): Promise<Record<string, SolanaTok
     for (const url of urls) {
       try {
         const out = await fetchRegistryFromUrl(url)
-        if (Object.keys(out).length > 0) return out
+        if (Object.keys(out).length > 0) {
+          return {
+            ...STATIC_SOLANA_TOKEN_REGISTRY_ENTRIES,
+            ...out
+          }
+        }
       } catch (error) {
         lastError = error
       }
     }
     if (lastError) throw lastError
-    return {}
-  }).catch(() => ({}))
+    return { ...STATIC_SOLANA_TOKEN_REGISTRY_ENTRIES }
+  }).catch(() => ({ ...STATIC_SOLANA_TOKEN_REGISTRY_ENTRIES }))
 }
 

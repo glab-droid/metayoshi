@@ -25,9 +25,24 @@ export interface CosmosAddressConfig {
   envPrefix: string
 }
 
+const CRO_COIN_TYPE = 394
+const CRO_HRP = 'cro'
+const CRO_DECIMALS = 8
 const COSMOS_COIN_TYPE = 118
 const COSMOS_HRP = 'cosmos'
 const COSMOS_DECIMALS = 6
+
+const CRO_CONFIG: CosmosAddressConfig = {
+  hrp: CRO_HRP,
+  coinType: CRO_COIN_TYPE,
+  decimals: CRO_DECIMALS,
+  nativeDenom: 'basecro',
+  feeDenom: 'basecro',
+  feeAmountRaw: '2500',
+  gasLimit: '180000',
+  symbol: 'CRO',
+  envPrefix: 'CRO'
+}
 
 const COSMOS_CONFIG: CosmosAddressConfig = {
   hrp: COSMOS_HRP,
@@ -131,6 +146,8 @@ const COSMOS_NETWORK_CONFIGS: Record<string, CosmosAddressConfig> = {
     envPrefix: 'COREUM'
   },
   cosmos: COSMOS_CONFIG,
+  cro: CRO_CONFIG,
+  'cronos-pos': CRO_CONFIG,
   evmos: {
     hrp: 'evmos',
     coinType: 60,
@@ -292,6 +309,7 @@ function normalizeCosmosConfigKey(value: string): string {
     .trim()
     .toLowerCase()
     .replace(/^cosmos--/, '')
+    .replace(/^cro--/, '')
 }
 
 function getEnvOverride(config: CosmosAddressConfig): Partial<CosmosAddressConfig> {
@@ -333,9 +351,8 @@ export async function deriveCosmosAddress(
   accountIndex = 0,
   opts?: { hrp?: string; coinType?: number }
 ): Promise<CosmosAddressResult> {
-  // Default to the canonical Cosmos path unless the active chain overrides it.
-  const hrp = String(opts?.hrp || COSMOS_HRP).trim() || COSMOS_HRP
-  const coinType = Number.isInteger(opts?.coinType) ? Number(opts?.coinType) : COSMOS_COIN_TYPE
+  const hrp = String(opts?.hrp || CRO_HRP).trim() || CRO_HRP
+  const coinType = Number.isInteger(opts?.coinType) ? Number(opts?.coinType) : CRO_COIN_TYPE
   const path = `m/44'/${coinType}'/${accountIndex}'/0/0`
   const seed = mnemonicToSeedSync(mnemonic.trim())
   const root = HDKey.fromMasterSeed(seed)
@@ -390,4 +407,8 @@ export function isCosmosAddressForHrp(value: string, hrp: string): boolean {
   } catch {
     return false
   }
+}
+
+export function isCroCosmosAddress(value: string): boolean {
+  return isCosmosAddressForHrp(value, CRO_HRP)
 }

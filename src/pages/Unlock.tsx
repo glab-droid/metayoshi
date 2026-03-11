@@ -5,7 +5,7 @@ import { Button } from '../components/Button'
 import { Input } from '../components/Input'
 import { useWalletStore } from '../store/walletStore'
 
-const APP_VERSION: string = import.meta.env.VITE_APP_VERSION ?? 'metayoshi-0.1.7'
+const APP_VERSION: string = import.meta.env.VITE_APP_VERSION ?? 'metayoshi-0.1.8'
 
 const Unlock: React.FC = () => {
   const [password, setPassword] = useState('')
