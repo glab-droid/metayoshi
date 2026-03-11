@@ -50,3 +50,4 @@ src/coins/logos/*.css
 src/coins/logos/*.wasm
 dist
 docs/metayoshi-wallet-fusion-master-runbook.md
+scripts
